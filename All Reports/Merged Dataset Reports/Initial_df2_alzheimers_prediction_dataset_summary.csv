@@ -1,0 +1,25 @@
+"variable","min","Q1","median","mean","Q3","max","n_categories","categories"
+"Age",50,61,72,71.9647025564396,83,94,NA,NA
+"Education.Level",0,4,9,9.48751396685648,14,19,NA,NA
+"BMI",18.5,22.7,26.8,26.7806389079601,30.9,35,NA,NA
+"Cognitive.Test.Score",30,47,65,64.6542412126597,82,99,NA,NA
+"Gender",NA,NA,NA,NA,NA,NA,2,"Female, Male"
+"Physical.Activity.Level",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Smoking.Status",NA,NA,NA,NA,NA,NA,3,"Current, Former, Never"
+"Alcohol.Consumption",NA,NA,NA,NA,NA,NA,3,"Never, Occasionally, Regularly"
+"Diabetes",NA,NA,NA,NA,NA,NA,2,"No, Yes"
+"Hypertension",NA,NA,NA,NA,NA,NA,2,"No, Yes"
+"Cholesterol.Level",NA,NA,NA,NA,NA,NA,2,"High, Normal"
+"Family.History.of.Alzheimer.s",NA,NA,NA,NA,NA,NA,2,"No, Yes"
+"Depression.Level",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Sleep.Quality",NA,NA,NA,NA,NA,NA,3,"Average, Good, Poor"
+"Dietary.Habits",NA,NA,NA,NA,NA,NA,3,"Average, Healthy, Unhealthy"
+"Air.Pollution.Exposure",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Employment.Status",NA,NA,NA,NA,NA,NA,3,"Employed, Retired, Unemployed"
+"Marital.Status",NA,NA,NA,NA,NA,NA,3,"Married, Single, Widowed"
+"Genetic.Risk.Factor..APOE.ε4.allele.",NA,NA,NA,NA,NA,NA,2,"No, Yes"
+"Social.Engagement.Level",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Income.Level",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Stress.Levels",NA,NA,NA,NA,NA,NA,3,"High, Low, Medium"
+"Urban.vs.Rural.Living",NA,NA,NA,NA,NA,NA,2,"Rural, Urban"
+"Alzheimer.s.Diagnosis",NA,NA,NA,NA,NA,NA,2,"No, Yes"
