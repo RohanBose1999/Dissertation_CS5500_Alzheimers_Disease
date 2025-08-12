@@ -35,7 +35,7 @@ dataset_path    <- "../Datasets/Merged_Dataset.csv"
 target_variable <- "Alzheimer.s.Diagnosis"
 
 # 3) Define your output folder relative to current wd
-outdir <- "../All Reports/Cleaning Reports"
+outdir <- "../All Reports/2. Pre-processing Reports"
 if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
 ```
 
@@ -43,12 +43,17 @@ if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
 Creating user defined functions to Load Data
 
 ```{r}
-# Load the data
-df <- read.csv(
-  dataset_path,
-  stringsAsFactors = TRUE,
-  na.strings      = c("", "NA", " ")
-)
+# Function to load a CSV file into a data.frame
+load_data <- function(path) {
+  read.csv(
+    path,
+    stringsAsFactors = TRUE,    # keep character columns as characters
+    na.strings      = c("", "NA", " ")  # treat these as missing
+  )
+}
+
+# Load and inspect using the configured path
+df <- load_data(dataset_path)
 ```
 
 

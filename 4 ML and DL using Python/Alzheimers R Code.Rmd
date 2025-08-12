@@ -1,0 +1,973 @@
+---
+title: "Alzheimers R Code"
+author: "Rohan"
+date: "2025-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyr)
+library(sampling)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(fastDummies)
+library(factoextra)
+library(cluster)
+library(scales)
+library(dlookr)
+set.seed(123)
+```
+
+Defining global target variable, dataset_name and variables that will not go through encoding for the sake of reducing dimentionality
+```{r}
+
+
+# 1) Path to your CSV file:
+dataset_path    <- "../Datasets/Merged_Dataset.csv"
+
+# 2) Name of the column you want to predict (the “target”):
+target_variable <- "Alzheimer.s.Diagnosis"
+
+# 3) Any columns to drop before analysis (e.g. IDs, metadata):
+exclude_variable <- character(0)
+
+# If you don't need to drop anything, set:
+# exclude_variable <- character(0) or else mention in "" and if more than one then c("","",.....)
+
+```
+
+
+Creating user defined functions to Load and Inspect Data
+
+```{r}
+
+# Function to load a CSV file into a data.frame
+load_data <- function(path) {
+  read.csv(
+    path,
+    stringsAsFactors = FALSE,    # keep character columns as characters
+    na.strings      = c("", "NA", " ")  # treat these as missing
+  )
+}
+
+# Function to print basic info about a data.frame
+inspect_structure <- function(df) {
+  cat("Dimensions:", dim(df), "\n")                     # rows x columns
+  cat("Column names:\n"); print(names(df))              # list of columns
+  cat("Summary statistics:\n"); print(summary(df))      # min, max, median, etc.
+  cat("Missing values per column:\n"); 
+  print(colSums(is.na(df)))                             # count of NAs
+  cat("Data types:\n"); print(sapply(df, class))        # class of each column
+}
+
+# Load and inspect using the configured path
+df <- load_data(dataset_path)   # load your CSV into 'df'
+
+# Drop any duplicate columns ending with ".-"
+df <- df[, !grepl("\\.-$", names(df))]
+
+inspect_structure(df)           # display its structure and summary
+
+```
+
+
+```{r}
+
+# Compute mode (works for vectors)
+get_mode <- function(v) {
+  uniqv <- unique(na.omit(v))
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Clean missing values & coerce numeric-like text to numeric using dplyr
+clean_missing_values <- function(df) {
+  df <- df %>%
+    mutate(across(
+      where(is.character),
+      ~{
+        clean <- gsub("[^0-9\\.-]", "", .)           # remove non-numeric characters
+        clean[clean == ""] <- NA                    # turn empty strings into NA
+        num <- suppressWarnings(as.numeric(clean))   # try converting to numeric
+        if (any(!is.na(num))) num else .           # use numeric if possible, otherwise original
+      }
+    )) %>%
+    mutate(across(
+      where(is.numeric),
+      ~replace(., is.na(.), median(., na.rm = TRUE))  # replacing NA values for numerical columns with median
+    )) %>%
+    mutate(across(
+      where(~is.factor(.) || is.character(.)),  # replacing NA values for categorical columns with mode
+      ~replace(., is.na(.), get_mode(.))
+    ))
+  return(df)
+}
+
+# Replace outliers with median for all numeric columns using dplyr
+replace_outliers_with_median <- function(df) {
+  num_cols <- names(df)[sapply(df, is.numeric)]
+  for (col in num_cols) {
+    out_vals <- boxplot(df[[col]], plot = FALSE)$out
+    df[[col]][df[[col]] %in% out_vals] <- NA
+    df[[col]][is.na(df[[col]])] <- median(df[[col]], na.rm = TRUE)
+  }
+  return(df)
+}
+
+# Convert all remaining character columns to factors using dplyr
+convert_char_to_factor <- function(df) {
+  df <- df %>%
+    mutate(across(where(is.character), as.factor))
+  return(df)
+}
+
+# --- EXECUTE CLEANING PIPELINE ---
+df <- df %>%
+  clean_missing_values() %>%
+  replace_outliers_with_median() %>%
+  convert_char_to_factor()
+
+# 4. Drop any columns listed in exclude_variable
+if (length(exclude_variable) > 0) {
+  df <- df %>% select(-any_of(exclude_variable))
+}
+
+# Display the structure of the cleaned dataframe
+str(df)
+
+```
+
+
+```{r}
+#change visual of boxplot
+# Boxplots of each numeric variable grouped by the (now factor) target variable
+plot_boxplots_by_target <- function(df, target_col) {
+  # Make a local copy so we don't modify the original dataframe
+  plot_df <- df
+  
+  # 1) Ensure the target is a factor (for grouping)
+  plot_df[[target_col]] <- as.factor(plot_df[[target_col]])
+  
+  # 2) Identify all numeric columns (excluding the target variable itself)
+  num_vars <- setdiff(
+    names(plot_df)[sapply(plot_df, is.numeric)],
+    target_col
+  )
+  
+  # 3) Loop over each numeric variable and print its boxplot by target group
+  for (var in num_vars) {
+    p <- ggplot(plot_df, aes(x = .data[[target_col]], y = .data[[var]])) +
+      geom_boxplot(fill = "lightblue", outlier.alpha = 0.3) +
+      theme_minimal() +
+      labs(
+        title = paste("Boxplot of", var, "by", target_col),
+        x     = target_col,
+        y     = var
+      )
+    print(p)
+  }
+}
+
+# Call the function with your pre-defined target_variable
+plot_boxplots_by_target(df, target_variable)
+
+```
+
+```{r}
+#visual change, add density curve
+# Plot histograms for each numeric column in the dataframe
+plot_numeric_distributions <- function(df) {
+  # 1) Identify all numeric columns in the dataframe
+  num_vars <- names(df)[sapply(df, is.numeric)]
+  
+  # 2) Loop through each numeric variable and plot its histogram
+  for (var in num_vars) {
+    p <- ggplot(df, aes(x = .data[[var]])) +
+      geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+      theme_minimal() +
+      labs(
+        title = paste("Histogram of", var),
+        x     = var,
+        y     = "Count"
+      )
+    print(p)  # Only display the plot, do not save
+  }
+}
+
+# Call the function to plot all numeric distributions
+plot_numeric_distributions(df)
+
+
+```
+
+```{r}
+# 1. Specify columns to exclude from correlation analysis
+exclude_cols <- c(target_variable, "DiagnosisBinary", "ID")  # Add more column names if needed
+
+# 2. Remove excluded columns
+df_corr <- df %>% dplyr::select(-dplyr::any_of(exclude_cols))
+
+# 3. Coerce all numeric and factor columns to numeric
+df_num <- df_corr %>%
+  mutate(across(
+    where(~ is.numeric(.) || is.factor(.)),
+    ~as.numeric(as.character(.))
+  ))
+
+# 4. Keep only columns with more than one unique (non-NA) value
+var_cols <- sapply(df_num, function(x) is.numeric(x) && length(unique(na.omit(x))) > 1)
+df_num   <- df_num[, var_cols, drop = FALSE]
+
+# 5. Check if enough variables exist for correlation
+if (ncol(df_num) < 2) {
+  cat("Not enough numeric columns with variation for correlation analysis.\n")
+} else {
+  # 6. Compute the correlation matrix
+  cm <- cor(df_num, use = "pairwise.complete.obs")
+  
+  # 7. Only look at unique pairs (remove lower triangle and diagonal)
+  cm[lower.tri(cm, diag = TRUE)] <- NA
+  
+  # 8. Identify variable pairs with abs(correlation) > 0.7
+  corr_pairs <- which(abs(cm) > 0.7, arr.ind = TRUE)
+  
+  # 9. Print variable pairs with high correlation
+  if (nrow(corr_pairs) == 0) {
+    cat("No variable pairs with |correlation| > 0.7\n")
+  } else {
+    result <- data.frame(
+      Var1 = rownames(cm)[corr_pairs[,1]],
+      Var2 = colnames(cm)[corr_pairs[,2]],
+      Correlation = cm[corr_pairs]
+    )
+    print(result)
+  }
+}
+
+```
+
+
+
+
+```{r}
+# 1. List columns to exclude (target, binary target, IDs, or others)
+exclude_cols <- c(target_variable, "DiagnosisBinary", "ID")  # Add others if needed
+
+# 2. Remove excluded columns before correlation
+df_corr <- df %>% dplyr::select(-dplyr::any_of(exclude_cols))
+
+# 3. Convert all numeric and factor columns to numeric (so factors are coded as numbers)
+df_num <- df_corr %>%
+  mutate(across(
+    where(~ is.numeric(.) || is.factor(.)),
+    ~as.numeric(as.character(.))
+  ))
+
+# 4. Keep only columns that are numeric AND have more than one unique non-NA value
+var_cols <- sapply(df_num, function(x) is.numeric(x) && length(unique(na.omit(x))) > 1)
+df_num   <- df_num[, var_cols, drop = FALSE]
+
+# 5. Compute the correlation matrix on these columns
+cm <- cor(df_num, use = "pairwise.complete.obs")
+
+# 6. Print the correlation matrix
+print(cm)
+
+```
+
+
+Correlation matrix for numeric variables
+```{r}
+plot_correlation_matrix <- function(df, exclude_cols = c(target_variable, "DiagnosisBinary", "ID")) {
+  # 1. Exclude specified columns (target, IDs, etc.)
+  df_corr <- df %>% dplyr::select(-dplyr::any_of(exclude_cols))
+  
+  # 2. Identify numeric and numeric-like factor columns
+  num_cols <- sapply(df_corr, function(x) {
+    is.numeric(x) || (is.factor(x) && all(!is.na(as.numeric(as.character(levels(x))))))
+  })
+  num_df <- df_corr[, num_cols, drop = FALSE]
+  
+  # 3. Convert factor columns to numeric codes
+  for (col in names(num_df)) {
+    if (is.factor(num_df[[col]])) {
+      num_df[[col]] <- as.numeric(as.character(num_df[[col]]))
+    }
+  }
+  
+  # 4. Remove columns with only one unique non-NA value (constant)
+  var_cols <- sapply(num_df, function(x) length(unique(na.omit(x))) > 1)
+  num_df   <- num_df[, var_cols, drop = FALSE]
+  
+  # 5. If at least 2 variables remain, plot the correlation matrix
+  if (ncol(num_df) < 2) {
+    cat("Not enough numeric columns with variation for correlation plot.\n")
+  } else {
+    cm <- cor(num_df, use = "pairwise.complete.obs")
+    corrplot(
+      cm,
+      method = "color",
+      order  = "hclust",
+      tl.cex = 0.8,
+      tl.col = "black",
+      cl.pos = "r",
+      title  = "Correlation Matrix (numeric & factor-coded numeric)",
+      mar    = c(0,0,1,0)
+    )
+  }
+}
+
+# Usage example: just call the function with your cleaned dataframe
+plot_correlation_matrix(df)
+
+```
+
+```{r}
+#Prepare only numeric columns (drop target, IDs, etc.)
+exclude_cols <- c(target_variable, "DiagnosisBinary", "ID")
+df_num <- df %>%
+  dplyr::select(-dplyr::any_of(exclude_cols)) %>%
+  dplyr::select(where(is.numeric))
+
+#Compute correlation object
+corr_obj <- correlate(df_num)
+
+# 4) Plot full correlation heatmap
+plot(corr_obj)
+```
+
+```{r}
+#make a seperate file for function which we can import and run in the run file
+#explore mire dlookr to show efficiency
+dlookr_understand <- diagnose(df)
+print(dlookr_understand)
+```
+
+
+Plotting distribution of target variable
+```{r}
+# Plot distribution of target/class variable to check for class imbalance
+plot_target_distribution <- function(df, target_col) {
+  # Check if the target column exists in the dataframe
+  if (!(target_col %in% names(df))) {
+    cat("Target column not found.\n")
+    return()
+  }
+  
+  # Create a bar plot of the target column using ggplot2
+  print(
+    ggplot(df, aes_string(x = target_col)) +
+      geom_bar(fill = c("green", "red")) +
+      labs(
+        title = paste("Class Distribution of", target_col),
+        x     = target_col,
+        y     = "Count"
+      ) +
+      theme_minimal()
+  )
+}
+
+# Call the function using your target variable
+plot_target_distribution(df, target_col = target_variable)
+
+```
+
+
+Plotting stacked bar plots of each categorical feature by target class
+```{r}
+# Plot proportion (stacked, normalized) of each categorical variable by target class
+plot_categorical_vs_target <- function(df, target_col) {
+  # 1) Identify all factor (categorical) columns, except the target column
+  cat_cols <- setdiff(
+    names(df)[sapply(df, is.factor)],
+    target_col
+  )
+  
+  # 2) Loop over each categorical column and plot distribution by target
+  for (col in cat_cols) {
+    print(
+      ggplot(df, aes_string(x = col, fill = target_col)) +
+        geom_bar(position = "fill") +  # Stacks bars and normalizes to proportions
+        labs(
+          title = paste("Distribution of", col, "by", target_col),
+          x     = col,
+          y     = "Proportion"
+        ) +
+        scale_y_continuous(labels = scales::percent) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    )
+  }
+}
+
+# Usage: call with your target variable
+plot_categorical_vs_target(df, target_col = target_variable)
+
+```
+
+Chi-squared tests between all factor variables and the target
+```{r}
+#create a table and cvs export for dissertation support 
+# Run chi-squared tests between each factor/categorical column and the target
+chi_squared_tests <- function(df, target_col) {
+  # 1) Get names of all factor columns
+  cat_cols <- names(df)[sapply(df, is.factor)]
+  
+  # 2) For each categorical variable (except the target)
+  for (col in cat_cols) {
+    if (col != target_col) {
+      tbl <- table(df[[col]], df[[target_col]])
+      # Only test if at least 2 rows/columns in table (needed for chisq.test)
+      if (nrow(tbl) > 1 & ncol(tbl) > 1) {
+        test <- suppressWarnings(chisq.test(tbl))
+        cat(
+          "\nChi-squared test for:", col, "vs", target_col,
+          "\n   p-value:", round(test$p.value, 4),
+          ifelse(test$p.value < 0.05, "IS significant\n", "IS NOT significant\n")
+        )
+      } else {
+        cat("\nChi-squared test for:", col, "vs", target_col, 
+            "\n   Skipped: Table does not have enough variability.\n")
+      }
+    }
+  }
+}
+
+# Run chi-squared tests for all categorical variables against your target
+chi_squared_tests(df, target_col = target_variable)
+```
+
+```{r}
+# One-hot encode all factor columns except the target and any exclusions
+one_hot_encode_all_levels <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Identify which columns to encode (all factors except target & excluded columns)
+  cols_to_encode <- setdiff(
+    names(df)[sapply(df, is.factor)],
+    c(target_col, exclude_cols)
+  )
+  
+  # 2) Use fastDummies to create dummy variables for all levels (do not remove first dummy)
+  df <- fastDummies::dummy_cols(
+    df,
+    select_columns          = cols_to_encode,
+    remove_first_dummy      = FALSE,   # Keep all levels
+    remove_selected_columns = TRUE     # Drop original factor columns
+  )
+  
+  return(df)
+}
+
+# Apply one-hot encoding to your cleaned data
+df_encoded <- one_hot_encode_all_levels(
+  df,
+  target_col  = target_variable,
+  exclude_cols = exclude_variable
+)
+
+# Check resulting structure
+str(df_encoded)
+
+```
+PCA
+
+```{r}
+# Run PCA on all numeric columns except the target and excluded columns
+run_pca <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Determine columns to exclude (target and any additional exclusions)
+  cols_to_exclude <- c(target_col, exclude_cols)
+  
+  # 2) Subset only columns not in the exclude list
+  num_df <- df[, !(names(df) %in% cols_to_exclude)]
+  
+  # 3) Keep only numeric columns
+  num_df <- num_df[, sapply(num_df, is.numeric)]
+  
+  # 4) Scale (standardize) data and run PCA
+  pca <- prcomp(num_df, center = TRUE, scale. = TRUE)
+  
+  # 5) Print explained variance for each principal component
+  variance <- summary(pca)$importance[2, ]
+  cat("Explained variance by component:\n")
+  print(variance)
+  
+  return(pca)
+}
+
+# Example: Run PCA on your encoded dataframe
+pca_result <- run_pca(
+  df_encoded,
+  target_col    = target_variable,
+  exclude_cols  = exclude_variable
+)
+
+```
+
+```{r}
+# Plot a scree plot for a PCA result object
+plot_pca_scree <- function(pca) {
+  # 1) Calculate the proportion of variance explained by each PC
+  var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+  
+  # 2) Create a data frame for plotting
+  scree_data <- data.frame(
+    PC = seq_along(var_explained),
+    Variance = var_explained
+  )
+  
+  # 3) Plot the scree plot with ggplot2
+  ggplot(scree_data, aes(x = PC, y = Variance)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+      title = "PCA Scree Plot",
+      x     = "Principal Component",
+      y     = "Proportion of Variance Explained"
+    ) +
+    theme_minimal()
+}
+
+# Call the function to display the scree plot
+plot_pca_scree(pca_result)
+
+```
+
+```{r}
+# Run PCA and plot cumulative explained variance
+run_pca_analysis <- function(df, target_col = target_variable, exclude_cols = exclude_variable) {
+  # 1) Select only numeric columns, then drop the target and any excluded columns
+  num_df <- df %>%
+    dplyr::select(where(is.numeric)) %>%
+    dplyr::select(-dplyr::any_of(c(target_col, exclude_cols)))
+  
+  # 2) Run PCA with centering and scaling
+  pca_result <- prcomp(num_df, center = TRUE, scale. = TRUE)
+  
+  # 3) Print summary of PCA (shows variance explained, etc.)
+  print(summary(pca_result))
+  
+  # 4) Calculate and store the proportion of explained variance (PEV) for each PC
+  pca_result_var <- pca_result$sdev^2
+  pca_result_PEV <- pca_result_var / sum(pca_result_var)
+  
+  # 5) Plot cumulative explained variance (scree-style, but cumulative)
+  opar <- par(no.readonly = TRUE)   # Save old graphics parameters
+  plot(
+    cumsum(pca_result_PEV),
+    ylim = c(0, 1),
+    xlab = 'Principal Component',
+    ylab = 'Cumulative Proportion of Explained Variance',
+    type = "b",
+    col  = "orange",
+    main = "Cumulative Explained Variance by PCs"
+  )
+  abline(h = 0.8, col = 'red', lty = 'dashed')  # 80% threshold reference
+  par(opar)   # Restore old graphics parameters
+  
+  # 6) Return the PCA object for further analysis (scores, loadings, etc.)
+  return(pca_result)
+}
+
+# Example usage:
+pca_result <- run_pca_analysis(
+  df_encoded,
+  target_col   = target_variable,
+  exclude_cols = exclude_variable
+)
+
+```
+
+Working on a stratified sampling here as the dataset might be too large to run PCA on less powerful devices
+
+```{r}
+# Stratified sampling: creates a balanced sample by class (target variable)
+stratified_sample_by_target <- function(df,
+                                        target_col,
+                                        sizes,
+                                        remove_id = TRUE,
+                                        id_col    = "ID") {
+  # 1) Ensure the target column is a factor
+  if (!is.factor(df[[target_col]])) {
+    df[[target_col]] <- as.factor(df[[target_col]])
+  }
+  
+  # 2) Get class labels and number of classes
+  classes   <- levels(df[[target_col]])
+  n_classes <- length(classes)
+  
+  # 3) Prepare the size vector for strata sampling
+  if (length(sizes) == 1) {
+    size_vec <- rep(sizes, n_classes)
+  } else if (length(sizes) == n_classes) {
+    size_vec <- sizes
+  } else {
+    stop("`sizes` must be either length 1 or equal to the number of classes (", 
+         n_classes, ").")
+  }
+  
+  # 4) Perform stratified sampling without replacement
+  stratified_index <- sampling::strata(
+    df,
+    stratanames = target_col,
+    size        = size_vec,
+    method      = "srswor"
+  )$ID_unit
+  
+  sampled_df <- df[stratified_index, ]
+  
+  # 5) Optionally drop the ID column
+  if (remove_id && id_col %in% names(sampled_df)) {
+    sampled_df <- sampled_df %>% dplyr::select(-all_of(id_col))
+  }
+  
+  return(sampled_df)
+}
+
+# Example: Get a balanced sample (e.g., 3,000 per class)
+df_ready <- stratified_sample_by_target(
+  df         = df_encoded,
+  target_col = target_variable,
+  sizes      = 3260
+)
+
+# Check the resulting class proportions (should be balanced)
+prop.table(table(df_ready[[target_variable]]))
+
+```
+
+
+K-means Clustering
+
+```{r}
+
+#Run PCA on the stratified sample instead of the full encoded set
+pca_result_ready <- run_pca(
+  df         = df_ready,           #stratified sample
+  target_col = target_variable,
+  exclude_cols = exclude_variable
+)
+
+#Decide how many PCs to keep (90% variance considered)
+var_explained <- summary(pca_result_ready)$importance[2, ]
+cum_var       <- cumsum(var_explained)
+threshold     <- 0.90
+n_pcs         <- which(cum_var >= threshold)[1]
+cat(
+  "Retaining", n_pcs, "PCs (",
+  round(cum_var[n_pcs] * 100, 1), "% variance)\n"
+)
+
+#Considering those top‐PC scores
+pca_scores_ready <- pca_result_ready$x[, 1:n_pcs, drop = FALSE]
+
+#Elbow method on the entire stratified sample
+fviz_nbclust(
+  pca_scores_ready,
+  FUN     = kmeans,
+  method  = "wss",
+  k.max   = 10
+) +
+  labs(title = "Elbow Method on Stratified Sample") +
+  theme_classic()
+
+#Silhouette analysis on the entire stratified sample
+k_values        <- 2:9
+kmeans_results  <- list()
+sil_widths      <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  
+  km <- kmeans(pca_scores_ready, centers = k)
+  
+  # compute silhouette
+  sil <- silhouette(km$cluster, dist(pca_scores_ready))
+  sil_widths[i] <- mean(sil[, "sil_width"])
+  
+  #plot
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ")"),
+    border = NA,
+    cex.names = 0.6
+  )
+  
+  kmeans_results[[paste0("k", k)]] <- km
+}
+
+#Compare average silhouette widths to pick the best k
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+print(sil_df)
+
+# Build silhouette summary
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+```
+
+
+```{r}
+# 1. Pick the best number of clusters (k) based on silhouette analysis
+best_k <- sil_df$k[which.max(sil_df$ASW)]
+cat("Best k by average silhouette:", best_k, "\n")
+
+# 2. Re-run k-means clustering using the optimal k on the top principal components
+km_best <- kmeans(pca_scores_ready, centers = best_k)
+
+# 3. Prepare a data frame for plotting: use first two PCs and cluster assignments
+plot_df <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(km_best$cluster)
+)
+
+# 4. Scatter plot the clusters colored by their cluster assignment
+ggplot(plot_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k, ") on First Two PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+------K-means Clustering without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_ready %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. K-means silhouette analysis for k = 2 to 10
+sil_widths_km <- numeric()
+kmeans_results <- list()
+for (k in 2:10) {
+  km <- kmeans(orig_clust_minmax, centers = k)
+  kmeans_results[[k]] <- km
+  sil <- silhouette(km$cluster, dist(orig_clust_minmax))
+  sil_widths_km[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - K-means (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 3. Silhouette summary table for all k
+sil_df_km <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_km[2:10]
+)
+print(sil_df_km)
+
+# 4. Plot average silhouette width vs k
+plot(sil_df_km$k, sil_df_km$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (K-means, Original Features)")
+
+# 5. Select best k (highest silhouette width)
+best_k_km <- sil_df_km$k[which.max(sil_df_km$ASW)]
+cat("Best k by average silhouette width (k-means):", best_k_km, "\n")
+
+# 6. Run final k-means on original data with best k
+km_best <- kmeans(orig_clust_minmax, centers = best_k_km)
+
+# 7. Plot clusters on the first two min-max scaled features (no PCA)
+km_plot_df <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(km_best$cluster)
+)
+
+ggplot(km_plot_df, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k_km, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+
+----- Clustering Hierarchical
+
+```{r}
+# Hierarchical clustering on the stratified PCA scores
+
+# 1. Compute the Euclidean distance matrix on the PCA scores
+hc_dist_full <- dist(pca_scores_ready, method = "euclidean")
+
+# 2. Perform hierarchical clustering using Ward's method
+hc_ward_full <- hclust(hc_dist_full, method = "ward.D2")
+
+# 3. Plot the dendrogram (labels omitted for clarity)
+plot(
+  as.dendrogram(hc_ward_full),
+  main   = "Hierarchical Clustering Dendrogram (Ward) on Full Sample",
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+
+# 4. Highlight the best_k clusters on the dendrogram
+rect.hclust(hc_ward_full, k = best_k, border = "steelblue")
+
+# 5. Cut the tree into best_k clusters
+hc_clusters_full <- cutree(hc_ward_full, k = best_k)
+
+# 6. Prepare data for scatter plot: first two principal components, colored by cluster
+hc_plot_df_full <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(hc_clusters_full)
+)
+
+# 7. Scatter plot of clusters on first two PCs
+ggplot(hc_plot_df_full, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k, ") on Full Stratified PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+
+----- Clustering Hierarchical without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_ready %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. Compute distance matrix and hierarchical clustering
+hc_dist_orig <- dist(orig_clust_minmax, method = "euclidean")
+hc_ward_orig <- hclust(hc_dist_orig, method = "ward.D2")
+
+# 3. Silhouette analysis for k = 2 to 10
+sil_widths_hc <- numeric()
+for (k in 2:10) {
+  clusters <- cutree(hc_ward_orig, k)
+  sil <- silhouette(clusters, hc_dist_orig)
+  sil_widths_hc[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - Hierarchical (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 4. Silhouette summary table for all k
+sil_df_hc <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_hc[2:10]
+)
+print(sil_df_hc)
+
+# 5. Plot average silhouette width vs k
+plot(sil_df_hc$k, sil_df_hc$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (Hierarchical, Original Features)")
+
+# 6. Select best k (highest silhouette width)
+best_k_hc <- sil_df_hc$k[which.max(sil_df_hc$ASW)]
+cat("Best k by average silhouette width (hierarchical):", best_k_hc, "\n")
+
+# 7. Dendrogram with rectangles for chosen clusters
+plot(
+  as.dendrogram(hc_ward_orig),
+  main   = paste0("Hierarchical Clustering Dendrogram (k = ", best_k_hc, ")"),
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+rect.hclust(hc_ward_orig, k = best_k_hc, border = "steelblue")
+
+# 8. Assign clusters for the best k
+hc_clusters_orig <- cutree(hc_ward_orig, k = best_k_hc)
+
+# 9. Plot clusters on the first two min-max scaled features (no PCA)
+hc_plot_df_orig <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(hc_clusters_orig)
+)
+
+ggplot(hc_plot_df_orig, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k_hc, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+library(dplyr)
+
+# A general helper: 
+#   - df:       your data.frame or tibble  
+#   - target:   the name of the column you care about (as a string)  
+print_target_counts <- function(df, target) {
+  df %>% 
+    # count by the target column, even if it's a string
+    count(!!sym(target)) %>%  
+    # rename the count column to something meaningful
+    rename(n = n, !!sym(target) := !!sym(target)) %>%  
+    # print to console
+    print()
+}
+
+# Example usage:
+# If your cleaned data is in df1_clean:
+print_target_counts(df, "Alzheimer.s.Diagnosis")
+
+# If it’s in a merged dataset called `all_df`:
+# print_target_counts(all_df, "Alzheimer.s.Diagnosis")
+
+```
+

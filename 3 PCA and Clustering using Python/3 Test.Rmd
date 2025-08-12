@@ -1,0 +1,848 @@
+---
+title: "3 test"
+author: "Rohan"
+date: "2025-08-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(purrr)
+library(klaR)
+library(caret)
+library(nnet)
+library(tidyr)
+library(sampling)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(fastDummies)
+library(factoextra)
+library(cluster)
+library(scales)
+# Set seed for reproducibility
+set.seed(123)
+```
+
+
+Defining global target variable, dataset_name and variables that will not go through encoding for the sake of reducing dimentionality
+```{r}
+
+# 1) Path to your CSV file:
+dataset_path    <- "../Datasets/Merged_Dataset.csv"
+
+# 2) Name of the column you want to predict (the “target”):
+target_variable <- "Alzheimer.s.Diagnosis"
+
+# 3) Any columns to drop before analysis (e.g. IDs, metadata):
+exclude_variable <- character(0)
+
+# If you don't need to drop anything, set:
+# exclude_variable <- character(0) or else mention in "" and if more than one then c("","",.....)
+
+# 4) Define your output folder relative to current wd
+outdir <- "../All Reports/3. PCA and Clustering"
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+```
+
+
+Creating user defined functions to Load Data
+
+```{r}
+# Function to load a CSV file into a data.frame
+load_data <- function(path) {
+  read.csv(
+    path,
+    stringsAsFactors = TRUE,    # keep character columns as characters
+    na.strings      = c("", "NA", " ")  # treat these as missing
+  )
+}
+
+# Load and inspect using the configured path
+df <- load_data(dataset_path)
+```
+
+```{r}
+# Function to save a dlookr diagnose report with an “initial” prefix
+save_diagnose_report <- function(df, name, prefix = "Initial") {
+  report    <- df %>% diagnose()
+  fname     <- paste0(prefix, "_", name, "_diagnose_report.csv")
+  file_path <- file.path(outdir, fname)
+  write.csv(report, file_path, row.names = FALSE)
+  message("Saved report to ", file_path)
+}
+
+# Function to save summary report
+save_summary_csv <- function(df, name, prefix = "Initial") {
+  
+  # 1) numeric summaries: min, Q1, median, mean, Q3, max
+  num_vars  <- names(df)[sapply(df, is.numeric)]
+  num_stats <- df %>%
+    summarise(across(all_of(num_vars),
+                     list(
+                       min    = ~ min(.x,   na.rm = TRUE),
+                       Q1     = ~ quantile(.x, .25, na.rm = TRUE),
+                       median = ~ median(.x, na.rm = TRUE),
+                       mean   = ~ mean(.x,   na.rm = TRUE),
+                       Q3     = ~ quantile(.x, .75, na.rm = TRUE),
+                       max    = ~ max(.x,   na.rm = TRUE)
+                     ),
+                     .names = "{col}_{fn}"
+    )) %>%
+    pivot_longer(
+      cols      = everything(),
+      names_to  = c("variable", "stat"),
+      names_sep = "_"
+    ) %>%
+    pivot_wider(names_from = stat, values_from = value)
+  
+  # 2) factor summaries: number of levels + labels
+  fac_vars  <- names(df)[sapply(df, is.factor)]
+  fac_stats <- tibble(
+    variable     = fac_vars,
+    n_categories = map_int(fac_vars, ~ nlevels(df[[.x]])),
+    categories   = map_chr(fac_vars, ~ paste(levels(df[[.x]]), collapse = ", "))
+  )
+  
+  # 3) join into one table
+  summary_tbl <- full_join(num_stats, fac_stats, by = "variable")
+  
+  # 4) write out
+  fname <- paste0(prefix, "_", name, "_summary.csv")
+  fpath <- file.path(outdir, fname)
+  write.csv(summary_tbl, fpath, row.names = FALSE)
+  message("Saved summary CSV to ", fpath)
+}
+```
+
+one-hot encoding
+```{r}
+# One-hot encode all factor columns except the target and any exclusions, and convert dummies to factors
+one_hot_encode_all_levels <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Identify which columns to encode (all factors except target & excluded columns)
+  cols_to_encode <- setdiff(
+    names(df)[sapply(df, is.factor)],
+    c(target_col, exclude_cols)
+  )
+  
+  # 2) Use fastDummies to create dummy variables (keep all levels)
+  df <- fastDummies::dummy_cols(
+    df,
+    select_columns          = cols_to_encode,
+    remove_first_dummy      = FALSE,   # Keep all levels
+    remove_selected_columns = TRUE     # Drop original factor columns
+  )
+  
+  # 3) Convert the new dummy columns (0/1) to factors
+  dummy_cols_created <- grep(paste0("^", paste(cols_to_encode, collapse = "|"), "_"), 
+                             names(df), value = TRUE)
+  df[dummy_cols_created] <- lapply(df[dummy_cols_created], factor)
+  
+  return(df)
+}
+
+# Apply one-hot encoding to your cleaned data
+df_encoded <- one_hot_encode_all_levels(
+  df,
+  target_col  = target_variable,
+  exclude_cols = exclude_variable
+)
+
+# Save dlookr diagnose report for the cleaned data
+save_diagnose_report(df_encoded, name = "dataset", prefix = "One-Hot_Encoded")
+
+# Save summary CSV for the cleaned data
+save_summary_csv(df_encoded, name = "dataset", prefix = "One-Hot_Encoded")
+```
+
+```{r}
+# Convert all binary factor columns to integers (0/1), leave others as is
+convert_binary_factors_to_integers <- function(df) {
+  df[] <- lapply(df, function(col) {
+    if (is.factor(col) && nlevels(col) == 2) {
+      # Convert factor to integer 0/1 (subtract 1 to start from 0)
+      as.integer(as.numeric(col) - 1)
+    } else {
+      col
+    }
+  })
+  return(df)
+}
+
+# Example usage
+df_converted <- convert_binary_factors_to_integers(df_encoded)
+
+```
+
+Working on a stratified sampling here as the dataset might be too large to run PCA on less powerful devices
+
+```{r}
+# Stratified sampling: creates a balanced sample by class (target variable)
+stratified_sample_by_target <- function(df,
+                                        target_col,
+                                        sizes,
+                                        remove_id = TRUE,
+                                        id_col    = "ID") {
+  # 1) Ensure the target column is a factor
+  if (!is.factor(df[[target_col]])) {
+    df[[target_col]] <- as.factor(df[[target_col]])
+  }
+  
+  # 2) Get class labels and number of classes
+  classes   <- levels(df[[target_col]])
+  n_classes <- length(classes)
+  
+  # 3) Prepare the size vector for strata sampling
+  if (length(sizes) == 1) {
+    size_vec <- rep(sizes, n_classes)
+  } else if (length(sizes) == n_classes) {
+    size_vec <- sizes
+  } else {
+    stop("`sizes` must be either length 1 or equal to the number of classes (", 
+         n_classes, ").")
+  }
+  
+  # 4) Perform stratified sampling without replacement
+  stratified_index <- sampling::strata(
+    df,
+    stratanames = target_col,
+    size        = size_vec,
+    method      = "srswor"
+  )$ID_unit
+  
+  sampled_df <- df[stratified_index, ]
+  
+  # 5) Optionally drop the ID column
+  if (remove_id && id_col %in% names(sampled_df)) {
+    sampled_df <- sampled_df %>% dplyr::select(-all_of(id_col))
+  }
+  
+  return(sampled_df)
+}
+
+# Example: Get a balanced sample (e.g., 3,000 per class)
+df_ready <- stratified_sample_by_target(
+  df         = df_converted,
+  target_col = target_variable,
+  sizes      = 3260
+)
+
+# Check the resulting class proportions (should be balanced)
+prop.table(table(df_ready[[target_variable]]))
+
+```
+
+PCA
+```{r}
+# Run PCA on all numeric columns except the target and excluded columns
+run_pca <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Determine columns to exclude (target and any additional exclusions)
+  cols_to_exclude <- c(target_col, exclude_cols)
+  
+  # 2) Subset only columns not in the exclude list
+  num_df <- df[, !(names(df) %in% cols_to_exclude)]
+  
+  # 3) Keep only numeric columns
+  num_df <- num_df[, sapply(num_df, is.numeric)]
+  
+  # 4) Scale (standardize) data and run PCA
+  pca <- prcomp(num_df, center = TRUE, scale. = TRUE)
+  
+  # 5) Print explained variance for each principal component
+  variance <- summary(pca)$importance[2, ]
+  cat("Explained variance by component:\n")
+  print(variance)
+  
+  return(pca)
+}
+
+# Example: Run PCA on your encoded dataframe
+pca_result <- run_pca(
+  df_ready,
+  target_col    = target_variable,
+  exclude_cols  = exclude_variable
+)
+```
+
+```{r}
+# Plot a scree plot for a PCA result object
+plot_pca_scree <- function(pca) {
+  # 1) Calculate the proportion of variance explained by each PC
+  var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+  
+  # 2) Create a data frame for plotting
+  scree_data <- data.frame(
+    PC = seq_along(var_explained),
+    Variance = var_explained
+  )
+  
+  # 3) Plot the scree plot with ggplot2
+  ggplot(scree_data, aes(x = PC, y = Variance)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+      title = "PCA Scree Plot",
+      x     = "Principal Component",
+      y     = "Proportion of Variance Explained"
+    ) +
+    theme_minimal()
+}
+
+# Call the function to display the scree plot
+plot_pca_scree(pca_result)
+
+```
+
+```{r}
+# Run PCA and plot cumulative explained variance
+run_pca_analysis <- function(df, target_col = target_variable, exclude_cols = exclude_variable) {
+  # 1) Select only numeric columns, then drop the target and any excluded columns
+  num_df <- df %>%
+    dplyr::select(where(is.numeric)) %>%
+    dplyr::select(-dplyr::any_of(c(target_col, exclude_cols)))
+  
+  # 2) Run PCA with centering and scaling
+  pca_result <- prcomp(num_df, center = TRUE, scale. = TRUE)
+  
+  # 3) Print summary of PCA (shows variance explained, etc.)
+  print(summary(pca_result))
+  
+  # 4) Calculate and store the proportion of explained variance (PEV) for each PC
+  pca_result_var <- pca_result$sdev^2
+  pca_result_PEV <- pca_result_var / sum(pca_result_var)
+  
+  # 5) Plot cumulative explained variance (scree-style, but cumulative)
+  opar <- par(no.readonly = TRUE)   # Save old graphics parameters
+  plot(
+    cumsum(pca_result_PEV),
+    ylim = c(0, 1),
+    xlab = 'Principal Component',
+    ylab = 'Cumulative Proportion of Explained Variance',
+    type = "b",
+    col  = "orange",
+    main = "Cumulative Explained Variance by PCs"
+  )
+  abline(h = 0.8, col = 'red', lty = 'dashed')  # 80% threshold reference
+  par(opar)   # Restore old graphics parameters
+  
+  # 6) Return the PCA object for further analysis (scores, loadings, etc.)
+  return(pca_result)
+}
+
+# Example usage:
+pca_result <- run_pca_analysis(
+  df_ready,
+  target_col   = target_variable,
+  exclude_cols = exclude_variable
+)
+
+```
+
+K-means Clustering
+
+```{r}
+
+#Run PCA on the stratified sample instead of the full encoded set
+pca_result_ready <- run_pca(
+  df         = df_ready,           #stratified sample
+  target_col = target_variable,
+  exclude_cols = exclude_variable
+)
+
+#Decide how many PCs to keep (90% variance considered)
+var_explained <- summary(pca_result_ready)$importance[2, ]
+cum_var       <- cumsum(var_explained)
+threshold     <- 0.90
+n_pcs         <- which(cum_var >= threshold)[1]
+cat(
+  "Retaining", n_pcs, "PCs (",
+  round(cum_var[n_pcs] * 100, 1), "% variance)\n"
+)
+
+#Considering those top‐PC scores
+pca_scores_ready <- pca_result_ready$x[, 1:n_pcs, drop = FALSE]
+
+#Elbow method on the entire stratified sample
+fviz_nbclust(
+  pca_scores_ready,
+  FUN     = kmeans,
+  method  = "wss",
+  k.max   = 10
+) +
+  labs(title = "Elbow Method on Stratified Sample") +
+  theme_classic()
+
+#Silhouette analysis on the entire stratified sample
+k_values        <- 2:9
+kmeans_results  <- list()
+sil_widths      <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  
+  km <- kmeans(pca_scores_ready, centers = k)
+  
+  # compute silhouette
+  sil <- silhouette(km$cluster, dist(pca_scores_ready))
+  sil_widths[i] <- mean(sil[, "sil_width"])
+  
+  #plot
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ")"),
+    border = NA,
+    cex.names = 0.6
+  )
+  
+  kmeans_results[[paste0("k", k)]] <- km
+}
+
+#Compare average silhouette widths to pick the best k
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+print(sil_df)
+
+# Build silhouette summary
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+```
+
+
+```{r}
+# 1. Pick the best number of clusters (k) based on silhouette analysis
+best_k <- sil_df$k[which.max(sil_df$ASW)]
+cat("Best k by average silhouette:", best_k, "\n")
+
+# 2. Re-run k-means clustering using the optimal k on the top principal components
+km_best <- kmeans(pca_scores_ready, centers = best_k)
+
+# 3. Prepare a data frame for plotting: use first two PCs and cluster assignments
+plot_df <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(km_best$cluster)
+)
+
+# 4. Scatter plot the clusters colored by their cluster assignment
+library(ggplot2)
+ggplot(plot_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k, ") on First Two PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+TEST CLUSTERING WITHOUT PCA RESULT
+```{r}
+#── 1. Prepare data: drop target/excluded and Min–Max scale ────────────────────
+orig_clust_df <- df_ready %>%
+  select(- any_of(c(target_variable, exclude_variable)))
+
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+#── 2. Silhouette analysis for k = 2:10 ─────────────────────────────────────────
+sil_widths_km <- numeric(10)
+kmeans_results <- vector("list", 10)
+
+for (k in 2:10) {
+  set.seed(123)  
+  km <- kmeans(orig_clust_minmax, centers = k)
+  kmeans_results[[k]] <- km
+
+  sil <- silhouette(km$cluster, dist(orig_clust_minmax))
+  sil_widths_km[k] <- mean(sil[, "sil_width"])
+  
+  # optional: display each silhouette plot
+  plot(sil,
+       main = paste("Silhouette Plot (k =", k, ")"),
+       border = NA, cex.names = 0.6)
+}
+
+#── 3. Summarize silhouette widths and pick best k ─────────────────────────────
+sil_df_km <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_km[2:10]
+)
+print(sil_df_km)
+
+best_k_km <- sil_df_km$k[which.max(sil_df_km$ASW)]
+cat("Best k by average silhouette width:", best_k_km, "\n")
+
+#── 4. Final k-means with best k ────────────────────────────────────────────────
+set.seed(123)
+km_best <- kmeans(orig_clust_minmax, centers = best_k_km)
+
+#── 5. (Optional) Check cardinality of first two raw features ───────────────────
+cat("Unique values in raw feature 1 & 2:\n")
+print(sapply(orig_clust_df[, 1:2], function(x) length(unique(x))))
+
+#── 6. Plot clustered data on first two features *with jitter* ─────────────────
+km_plot_df <- data.frame(
+  Feature1 = orig_clust_minmax[[1]],
+  Feature2 = orig_clust_minmax[[2]],
+  cluster  = factor(km_best$cluster)
+)
+
+ggplot(km_plot_df, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_jitter(width = 0.01, height = 0.01, alpha = 0.6, size = 1.5) +
+  labs(
+    title = paste0("K‑means Clustering (k=", best_k_km, ") on Features 1 & 2 (jittered)"),
+    x     = "Feature 1 (min–max scaled)",
+    y     = "Feature 2 (min–max scaled)",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+#── 7. (Optional) 2D PCA plot for comparison ────────────────────────────────────
+pca_res <- prcomp(orig_clust_minmax, center = TRUE, scale. = FALSE)
+pca_df <- data.frame(
+  PC1     = pca_res$x[, 1],
+  PC2     = pca_res$x[, 2],
+  cluster = factor(km_best$cluster)
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K‑means Clustering (k=", best_k_km, ") on PC1 vs PC2"),
+    x     = "PC1",
+    y     = "PC2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+```
+
+
+
+------K-means Clustering without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_ready %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. K-means silhouette analysis for k = 2 to 10
+library(cluster)
+sil_widths_km <- numeric()
+kmeans_results <- list()
+for (k in 2:10) {
+  set.seed(123)  # for reproducibility
+  km <- kmeans(orig_clust_minmax, centers = k)
+  kmeans_results[[k]] <- km
+  sil <- silhouette(km$cluster, dist(orig_clust_minmax))
+  sil_widths_km[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - K-means (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 3. Silhouette summary table for all k
+sil_df_km <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_km[2:10]
+)
+print(sil_df_km)
+
+# 4. Plot average silhouette width vs k
+plot(sil_df_km$k, sil_df_km$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (K-means, Original Features)")
+
+# 5. Select best k (highest silhouette width)
+best_k_km <- sil_df_km$k[which.max(sil_df_km$ASW)]
+cat("Best k by average silhouette width (k-means):", best_k_km, "\n")
+
+# 6. Run final k-means on original data with best k
+set.seed(123)
+km_best <- kmeans(orig_clust_minmax, centers = best_k_km)
+
+# 7. Plot clusters on the first two min-max scaled features (no PCA)
+km_plot_df <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(km_best$cluster)
+)
+
+library(ggplot2)
+ggplot(km_plot_df, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k_km, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+
+----- Clustering Hierarchical
+
+```{r}
+# Hierarchical clustering on the stratified PCA scores
+
+# 1. Compute the Euclidean distance matrix on the PCA scores
+hc_dist_full <- dist(pca_scores_ready, method = "euclidean")
+
+# 2. Perform hierarchical clustering using Ward's method
+hc_ward_full <- hclust(hc_dist_full, method = "ward.D2")
+
+# 3. Plot the dendrogram (labels omitted for clarity)
+plot(
+  as.dendrogram(hc_ward_full),
+  main   = "Hierarchical Clustering Dendrogram (Ward) on Full Sample",
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+
+# 4. Highlight the best_k clusters on the dendrogram
+rect.hclust(hc_ward_full, k = best_k, border = "steelblue")
+
+# 5. Cut the tree into best_k clusters
+hc_clusters_full <- cutree(hc_ward_full, k = best_k)
+
+# 6. Prepare data for scatter plot: first two principal components, colored by cluster
+hc_plot_df_full <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(hc_clusters_full)
+)
+
+# 7. Scatter plot of clusters on first two PCs
+ggplot(hc_plot_df_full, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k, ") on Full Stratified PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+----- Clustering Hierarchical without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_ready %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. Compute distance matrix and hierarchical clustering
+hc_dist_orig <- dist(orig_clust_minmax, method = "euclidean")
+hc_ward_orig <- hclust(hc_dist_orig, method = "ward.D2")
+
+# 3. Silhouette analysis for k = 2 to 10
+library(cluster)
+sil_widths_hc <- numeric()
+for (k in 2:10) {
+  clusters <- cutree(hc_ward_orig, k)
+  sil <- silhouette(clusters, hc_dist_orig)
+  sil_widths_hc[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - Hierarchical (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 4. Plot average silhouette width vs. k
+plot(2:10, sil_widths_hc[2:10], type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (Hierarchical, Original Features)")
+
+# 5. Select best k (highest silhouette width)
+best_k_hc <- which.max(sil_widths_hc)
+cat("Best k by average silhouette width (hierarchical):", best_k_hc, "\n")
+
+# 6. Dendrogram with rectangles for chosen clusters
+plot(
+  as.dendrogram(hc_ward_orig),
+  main   = paste0("Hierarchical Clustering Dendrogram (k = ", best_k_hc, ")"),
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+rect.hclust(hc_ward_orig, k = best_k_hc, border = "steelblue")
+
+# 7. Assign clusters for the best k
+hc_clusters_orig <- cutree(hc_ward_orig, k = best_k_hc)
+
+# 8. Plot clusters on the first two min-max scaled features (no PCA)
+hc_plot_df_orig <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(hc_clusters_orig)
+)
+
+library(ggplot2)
+ggplot(hc_plot_df_orig, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k_hc, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+TEST CLUSTERING WITHOUT PCA RESULT
+```{r}
+#── 1. Prepare data: drop target/excluded and Min–Max scale ────────────────────
+orig_clust_df <- df_ready %>%
+  select(- any_of(c(target_variable, exclude_variable)))
+
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+#── 2. Compute distance matrix and hierarchical clustering (Ward’s method) ────
+hc_dist_orig  <- dist(orig_clust_minmax, method = "euclidean")
+hc_ward_orig  <- hclust(hc_dist_orig, method = "ward.D2")
+
+#── 3. Silhouette analysis for k = 2:10 ────────────────────────────────────────
+sil_widths_hc <- numeric(10)
+
+for (k in 2:10) {
+  clusters <- cutree(hc_ward_orig, k)
+  sil      <- silhouette(clusters, hc_dist_orig)
+  sil_widths_hc[k] <- mean(sil[, "sil_width"])
+  
+  # optional: display each silhouette plot
+  plot(sil,
+       main = paste("Silhouette Plot (k =", k, ") - Hierarchical"),
+       border = NA, cex.names = 0.6)
+}
+
+#── 4. Summarize silhouette widths and pick best k ─────────────────────────────
+sil_df_hc <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_hc[2:10]
+)
+print(sil_df_hc)
+
+best_k_hc <- sil_df_hc$k[which.max(sil_df_hc$ASW)]
+cat("Best k by average silhouette width (hierarchical):", best_k_hc, "\n")
+
+#── 5. Plot Avg. Silhouette Width vs k ────────────────────────────────────────
+plot(sil_df_hc$k, sil_df_hc$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (Hierarchical)")
+
+#── 6. Dendrogram with rectangles for chosen clusters ─────────────────────────
+plot(as.dendrogram(hc_ward_orig),
+     main   = paste0("Hierarchical Clustering Dendrogram (k = ", best_k_hc, ")"),
+     ylab   = "Height",
+     labels = FALSE,
+     hang   = -1)
+rect.hclust(hc_ward_orig, k = best_k_hc, border = "steelblue")
+
+#── 7. Assign clusters for the best k ─────────────────────────────────────────
+hc_clusters_orig <- cutree(hc_ward_orig, k = best_k_hc)
+
+#── 8. (Optional) Check cardinality of first two raw features ──────────────────
+cat("Unique values in raw feature 1 & 2:\n")
+print(sapply(orig_clust_df[, 1:2], function(x) length(unique(x))))
+
+#── 9. Plot clustered data on first two features *with jitter* ────────────────
+hc_plot_df_orig <- data.frame(
+  Feature1 = orig_clust_minmax[[1]],
+  Feature2 = orig_clust_minmax[[2]],
+  cluster  = factor(hc_clusters_orig)
+)
+
+ggplot(hc_plot_df_orig, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_jitter(width = 0.01, height = 0.01, alpha = 0.6, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k=", best_k_hc, 
+                   ") on Features 1 & 2 (jittered)"),
+    x     = "Feature 1 (min–max scaled)",
+    y     = "Feature 2 (min–max scaled)",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+#── 10. (Optional) 2D PCA plot for comparison ─────────────────────────────────
+pca_res <- prcomp(orig_clust_minmax, center = TRUE, scale. = FALSE)
+pca_df  <- data.frame(
+  PC1     = pca_res$x[, 1],
+  PC2     = pca_res$x[, 2],
+  cluster = factor(hc_clusters_orig)
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k=", best_k_hc, 
+                   ") on PC1 vs PC2"),
+    x     = "PC1",
+    y     = "PC2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+```

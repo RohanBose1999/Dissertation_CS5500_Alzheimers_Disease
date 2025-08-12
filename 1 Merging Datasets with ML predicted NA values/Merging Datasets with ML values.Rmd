@@ -43,7 +43,7 @@ exclude_variable_2 <- "Country"
 # If you don't need to drop anything, set: exclude_variable <- character(0)
 
 # 4) define your output folder relative to current wd
-outdir <- "../All Reports/Merged Dataset Reports"
+outdir <- "../All Reports/1. Merged Dataset Reports"
 ```
 
 Creating user defined functions to Load and Inspect Data
