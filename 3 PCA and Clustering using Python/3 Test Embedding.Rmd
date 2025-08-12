@@ -1,0 +1,1228 @@
+---
+title: "3 Test Embedding"
+author: "Rohan"
+date: "2025-08-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dlookr)
+library(purrr)
+library(klaR)
+library(caret)
+library(nnet)
+library(tidyr)
+library(sampling)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(fastDummies)
+library(factoextra)
+library(cluster)
+library(scales)
+# Set seed for reproducibility
+set.seed(123)
+```
+
+Defining global target variable, dataset_name and variables that will not go through encoding for the sake of reducing dimentionality
+```{r}
+
+# 1) Path to your CSV file:
+dataset_path    <- "../Datasets/Merged_Dataset.csv"
+
+# 2) Name of the column you want to predict (the “target”):
+target_variable <- "Alzheimer.s.Diagnosis"
+
+# 3) Any columns to drop before analysis (e.g. IDs, metadata):
+exclude_variable <- character(0)
+
+# If you don't need to drop anything, set:
+# exclude_variable <- character(0) or else mention in "" and if more than one then c("","",.....)
+
+# 4) Define your output folder relative to current wd
+outdir <- "../All Reports/3. PCA and Clustering Embedding"
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+```
+
+
+Creating user defined functions to Load Data
+
+```{r}
+# Function to load a CSV file into a data.frame
+load_data <- function(path) {
+  read.csv(
+    path,
+    stringsAsFactors = TRUE,    # keep character columns as characters
+    na.strings      = c("", "NA", " ")  # treat these as missing
+  )
+}
+
+# Load and inspect using the configured path
+df <- load_data(dataset_path)
+```
+
+
+```{r}
+# --- Your specs (must match the ones used in encoding) ---
+binary1 <- c(
+  "FamilyHistoryAlzheimers", "CardiovascularDisease", "Diabetes",
+  "HeadInjury", "Hypertension", "MemoryComplaints",
+  "BehavioralProblems", "Confusion", "Disorientation", "PersonalityChanges",
+  "DifficultyCompletingTasks", "Forgetfulness", "Genetic.Risk.Factor..APOE.ε4.allele."
+)
+
+multi1 <- list(
+  Gender         = list(levels = c(0,1),     labels = c("Male","Female")),
+  EducationLevel = list(levels = c(0,1,2,3), labels = c("None","High School","Bachelor's","Higher")),
+  Physical.Activity.CAT= list(levels = c(0,1,2),     labels = c("Low","Medium","High")),
+  Smoking.Status= list(levels = c(0,1,2),     labels = c("Never","Former","Current")),
+  Alcohol.Consumption.CAT= list(levels = c(0,1,2),     labels = c("Never", "Occasionally", "Regularly")),
+  Cholesterol.Level= list(levels = c(0,1),     labels = c("Normal", "High")),
+  Depression.Level= list(levels = c(0,1,2),     labels = c("Low", "Medium", "High")),
+  Sleep.Quality.CAT= list(levels = c(0,1,2),     labels = c("Poor", "Average", "Good")),
+  Diet.Quality.CAT= list(levels = c(0,1,2),     labels = c("Unhealthy", "Average", "Healthy")),
+  Air.Pollution.Exposure= list(levels = c(0,1,2),     labels = c("Low", "Medium", "High")),
+  Social.Engagement.Level= list(levels = c(0,1,2),     labels = c("Low", "Medium", "High")),
+  Income.Level=  list(levels = c(0,1,2),     labels = c("Low", "Medium", "High")),
+  Stress.Levels=  list(levels = c(0,1,2),     labels = c("Low", "Medium", "High"))
+)
+
+# --- Reverse function ---
+revert_df <- function(df, binary_vars, multi_specs) {
+  # Warn for missing binaries
+  missing_bin <- setdiff(binary_vars, names(df))
+  if (length(missing_bin)) {
+    warning("These binary vars were not found and were skipped: ",
+            paste(missing_bin, collapse = ", "), call. = FALSE)
+  }
+
+  # Revert binaries "No/Yes" -> 0/1 (skip if not present)
+  df <- df %>%
+    mutate(across(any_of(binary_vars),
+                  ~ if (is.factor(.x) || is.character(.x)) {
+                      c("No" = 0L, "Yes" = 1L)[as.character(.x)]
+                    } else {
+                      .x
+                    }))
+
+  # Warn for missing multi-levels
+  missing_multi <- setdiff(names(multi_specs), names(df))
+  if (length(missing_multi)) {
+    warning("These multi-level vars were not found and were skipped: ",
+            paste(missing_multi, collapse = ", "), call. = FALSE)
+  }
+
+  # Revert multi-levels using direct mapping
+  for (var in intersect(names(multi_specs), names(df))) {
+    specs <- multi_specs[[var]]
+    mapping <- setNames(specs$levels, specs$labels)  # label -> numeric code
+    df[[var]] <- if (is.factor(df[[var]]) || is.character(df[[var]])) {
+      unname(mapping[as.character(df[[var]])])
+    } else {
+      df[[var]]
+    }
+  }
+
+  df
+}
+
+# --- Usage ---
+df <- revert_df(df, binary1, multi1)
+```
+
+
+```{r}
+# One-hot encode all factor columns except the target and any exclusions, and convert dummies to factors
+one_hot_encode_all_levels <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Identify which columns to encode (all factors except target & excluded columns)
+  cols_to_encode <- setdiff(
+    names(df)[sapply(df, is.factor)],
+    c(target_col, exclude_cols)
+  )
+  
+  # 2) Use fastDummies to create dummy variables (keep all levels)
+  df <- fastDummies::dummy_cols(
+    df,
+    select_columns          = cols_to_encode,
+    remove_first_dummy      = FALSE,   # Keep all levels
+    remove_selected_columns = TRUE     # Drop original factor columns
+  )
+  
+  # 3) Convert the new dummy columns (0/1) to factors
+  dummy_cols_created <- grep(paste0("^", paste(cols_to_encode, collapse = "|"), "_"), 
+                             names(df), value = TRUE)
+  df[dummy_cols_created] <- lapply(df[dummy_cols_created], factor)
+  
+  return(df)
+}
+
+# Apply one-hot encoding to your cleaned data
+df_encoded <- one_hot_encode_all_levels(
+  df,
+  target_col  = target_variable,
+  exclude_cols = exclude_variable
+)
+
+```
+
+Working on a stratified sampling here as the dataset might be too large to run PCA on less powerful devices
+
+```{r}
+# Stratified sampling: creates a balanced sample by class (target variable)
+stratified_sample_by_target <- function(df,
+                                        target_col,
+                                        sizes,
+                                        remove_id = TRUE,
+                                        id_col    = "ID") {
+  # 1) Ensure the target column is a factor
+  if (!is.factor(df[[target_col]])) {
+    df[[target_col]] <- as.factor(df[[target_col]])
+  }
+  
+  # 2) Get class labels and number of classes
+  classes   <- levels(df[[target_col]])
+  n_classes <- length(classes)
+  
+  # 3) Prepare the size vector for strata sampling
+  if (length(sizes) == 1) {
+    size_vec <- rep(sizes, n_classes)
+  } else if (length(sizes) == n_classes) {
+    size_vec <- sizes
+  } else {
+    stop("`sizes` must be either length 1 or equal to the number of classes (", 
+         n_classes, ").")
+  }
+  
+  # 4) Perform stratified sampling without replacement
+  stratified_index <- sampling::strata(
+    df,
+    stratanames = target_col,
+    size        = size_vec,
+    method      = "srswor"
+  )$ID_unit
+  
+  sampled_df <- df[stratified_index, ]
+  
+  # 5) Optionally drop the ID column
+  if (remove_id && id_col %in% names(sampled_df)) {
+    sampled_df <- sampled_df %>% dplyr::select(-all_of(id_col))
+  }
+  
+  return(sampled_df)
+}
+
+# Example: Get a balanced sample (e.g., 3,000 per class)
+df_ready <- stratified_sample_by_target(
+  df         = df_encoded,
+  target_col = target_variable,
+  sizes      = 3260
+)
+
+# Check the resulting class proportions (should be balanced)
+prop.table(table(df_ready[[target_variable]]))
+
+```
+
+```{r}
+# Function to save a dlookr diagnose report with an “initial” prefix
+save_diagnose_report <- function(df, name, prefix = "Initial") {
+  report    <- df %>% diagnose()
+  fname     <- paste0(prefix, "_", name, "_diagnose_report.csv")
+  file_path <- file.path(outdir, fname)
+  write.csv(report, file_path, row.names = FALSE)
+  message("Saved report to ", file_path)
+}
+
+# Function to save summary report
+save_summary_csv <- function(df, name, prefix = "Initial") {
+  
+  # 1) numeric summaries: min, Q1, median, mean, Q3, max
+  num_vars  <- names(df)[sapply(df, is.numeric)]
+  num_stats <- df %>%
+    summarise(across(all_of(num_vars),
+                     list(
+                       min    = ~ min(.x,   na.rm = TRUE),
+                       Q1     = ~ quantile(.x, .25, na.rm = TRUE),
+                       median = ~ median(.x, na.rm = TRUE),
+                       mean   = ~ mean(.x,   na.rm = TRUE),
+                       Q3     = ~ quantile(.x, .75, na.rm = TRUE),
+                       max    = ~ max(.x,   na.rm = TRUE)
+                     ),
+                     .names = "{col}_{fn}"
+    )) %>%
+    pivot_longer(
+      cols      = everything(),
+      names_to  = c("variable", "stat"),
+      names_sep = "_"
+    ) %>%
+    pivot_wider(names_from = stat, values_from = value)
+  
+  # 2) factor summaries: number of levels + labels
+  fac_vars  <- names(df)[sapply(df, is.factor)]
+  fac_stats <- tibble(
+    variable     = fac_vars,
+    n_categories = map_int(fac_vars, ~ nlevels(df[[.x]])),
+    categories   = map_chr(fac_vars, ~ paste(levels(df[[.x]]), collapse = ", "))
+  )
+  
+  # 3) join into one table
+  summary_tbl <- full_join(num_stats, fac_stats, by = "variable")
+  
+  # 4) write out
+  fname <- paste0(prefix, "_", name, "_summary.csv")
+  fpath <- file.path(outdir, fname)
+  write.csv(summary_tbl, fpath, row.names = FALSE)
+  message("Saved summary CSV to ", fpath)
+}
+
+# Usage
+
+# Save dlookr diagnose report for the cleaned data
+save_diagnose_report(df_ready, name = "dataset")
+
+# Save summary CSV for the cleaned data
+save_summary_csv(df_ready, name = "dataset")
+```
+```{r}
+# Convert all binary factor columns to integers (0/1), leave others as is
+convert_binary_factors_to_integers <- function(df, exclude_cols = NULL) {
+  df[] <- lapply(names(df), function(colname) {
+    col <- df[[colname]]
+    if (is.factor(col) && nlevels(col) == 2 && !(colname %in% exclude_cols)) {
+      # Convert factor to integer 0/1
+      as.integer(as.numeric(col) - 1)
+    } else {
+      col
+    }
+  })
+  names(df) <- names(df) # Preserve column names
+  return(df)
+}
+
+# Example usage: exclude target variable
+df_encoded <- convert_binary_factors_to_integers(df_ready, exclude_cols = target_variable)
+
+```
+
+
+```{r}
+# Function: Standardise numeric variables (Z-score) except binary and target
+standardise_numeric_except_binary <- function(df, target_col) {
+  df[] <- lapply(names(df), function(col_name) {
+    col <- df[[col_name]]
+    
+    # Leave non-numeric columns unchanged
+    if (!is.numeric(col)) return(col)
+    
+    # Leave target column unchanged
+    if (col_name == target_col) return(col)
+    
+    # Leave binary numeric variables unchanged (only 0 and 1 present)
+    unique_vals <- unique(col[!is.na(col)])
+    if (length(unique_vals) <= 2 && all(unique_vals %in% c(0, 1))) {
+      return(col)
+    }
+    
+    # Apply Z-score standardisation
+    mu <- mean(col, na.rm = TRUE)
+    sigma <- sd(col, na.rm = TRUE)
+    if (sigma == 0 || is.na(sigma)) {
+      return(col)  # avoid division by zero
+    } else {
+      return((col - mu) / sigma)
+    }
+  })
+  
+  # Return as data frame
+  df <- as.data.frame(df)
+  return(df)
+}
+
+# ==== Example usage ====
+df_scaled <- standardise_numeric_except_binary(df_encoded, target_col = target_variable)
+
+```
+
+```{r}
+str(df_scaled)
+```
+
+
+PCA
+```{r}
+# Run PCA on all numeric columns except the target and excluded columns
+run_pca <- function(df, target_col, exclude_cols = exclude_variable) {
+  # 1) Determine columns to exclude (target and any additional exclusions)
+  cols_to_exclude <- c(target_col, exclude_cols)
+  
+  # 2) Subset only columns not in the exclude list
+  num_df <- df[, !(names(df) %in% cols_to_exclude)]
+  
+  # 3) Keep only numeric columns
+  num_df <- num_df[, sapply(num_df, is.numeric)]
+  
+  # 4) Scale (standardize) data and run PCA
+  pca <- prcomp(num_df, center = TRUE, scale. = FALSE)
+  
+  # 5) Print explained variance for each principal component
+  variance <- summary(pca)$importance[2, ]
+  cat("Explained variance by component:\n")
+  print(variance)
+  
+  return(pca)
+}
+
+# Example: Run PCA on your encoded dataframe
+pca_result <- run_pca(
+  df_scaled,
+  target_col    = target_variable,
+  exclude_cols  = exclude_variable
+)
+```
+
+```{r}
+# Plot a scree plot for a PCA result object
+plot_pca_scree <- function(pca) {
+  # 1) Calculate the proportion of variance explained by each PC
+  var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+  
+  # 2) Create a data frame for plotting
+  scree_data <- data.frame(
+    PC = seq_along(var_explained),
+    Variance = var_explained
+  )
+  
+  # 3) Plot the scree plot with ggplot2
+  ggplot(scree_data, aes(x = PC, y = Variance)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+      title = "PCA Scree Plot",
+      x     = "Principal Component",
+      y     = "Proportion of Variance Explained"
+    ) +
+    theme_minimal()
+}
+
+# Call the function to display the scree plot
+plot_pca_scree(pca_result)
+
+```
+
+
+```{r}
+# Run PCA and plot cumulative explained variance
+run_pca_analysis <- function(df, target_col = target_variable, exclude_cols = exclude_variable) {
+  # 1) Select only numeric columns, then drop the target and any excluded columns
+  num_df <- df %>%
+    dplyr::select(where(is.numeric)) %>%
+    dplyr::select(-dplyr::any_of(c(target_col, exclude_cols)))
+  
+  # 2) Run PCA with centering and scaling
+  pca_result <- prcomp(num_df, center = TRUE, scale. = FALSE)
+  
+  # 3) Print summary of PCA (shows variance explained, etc.)
+  print(summary(pca_result))
+  
+  # 4) Calculate and store the proportion of explained variance (PEV) for each PC
+  pca_result_var <- pca_result$sdev^2
+  pca_result_PEV <- pca_result_var / sum(pca_result_var)
+  
+  # 5) Plot cumulative explained variance (scree-style, but cumulative)
+  opar <- par(no.readonly = TRUE)   # Save old graphics parameters
+  plot(
+    cumsum(pca_result_PEV),
+    ylim = c(0, 1),
+    xlab = 'Principal Component',
+    ylab = 'Cumulative Proportion of Explained Variance',
+    type = "b",
+    col  = "orange",
+    main = "Cumulative Explained Variance by PCs"
+  )
+  abline(h = 0.8, col = 'red', lty = 'dashed')  # 80% threshold reference
+  par(opar)   # Restore old graphics parameters
+  
+  # 6) Return the PCA object for further analysis (scores, loadings, etc.)
+  return(pca_result)
+}
+
+# Example usage:
+pca_result <- run_pca_analysis(
+  df_scaled,
+  target_col   = target_variable,
+  exclude_cols = exclude_variable
+)
+
+```
+
+K-means Clustering
+
+```{r}
+
+#Run PCA on the stratified sample instead of the full encoded set
+pca_result_ready <- run_pca(
+  df         = df_scaled,           #stratified sample
+  target_col = target_variable,
+  exclude_cols = exclude_variable
+)
+
+#Decide how many PCs to keep (90% variance considered)
+var_explained <- summary(pca_result_ready)$importance[2, ]
+cum_var       <- cumsum(var_explained)
+threshold     <- 0.90
+n_pcs         <- which(cum_var >= threshold)[1]
+cat(
+  "Retaining", n_pcs, "PCs (",
+  round(cum_var[n_pcs] * 100, 1), "% variance)\n"
+)
+
+#Considering those top‐PC scores
+pca_scores_ready <- pca_result_ready$x[, 1:n_pcs, drop = FALSE]
+
+#Elbow method on the entire stratified sample
+fviz_nbclust(
+  pca_scores_ready,
+  FUN     = kmeans,
+  method  = "wss",
+  k.max   = 10
+) +
+  labs(title = "Elbow Method on Stratified Sample") +
+  theme_classic()
+
+#Silhouette analysis on the entire stratified sample
+k_values        <- 2:9
+kmeans_results  <- list()
+sil_widths      <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  
+  km <- kmeans(pca_scores_ready, centers = k)
+  
+  # compute silhouette
+  sil <- silhouette(km$cluster, dist(pca_scores_ready))
+  sil_widths[i] <- mean(sil[, "sil_width"])
+  
+  #plot
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ")"),
+    border = NA,
+    cex.names = 0.6
+  )
+  
+  kmeans_results[[paste0("k", k)]] <- km
+}
+
+#Compare average silhouette widths to pick the best k
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+print(sil_df)
+
+# Build silhouette summary
+sil_df <- data.frame(
+  k   = k_values,
+  ASW = sil_widths
+)
+```
+
+```{r}
+# 1. Pick the best number of clusters (k) based on silhouette analysis
+best_k <- sil_df$k[which.max(sil_df$ASW)]
+cat("Best k by average silhouette:", best_k, "\n")
+
+# 2. Re-run k-means clustering using the optimal k on the top principal components
+km_best <- kmeans(pca_scores_ready, centers = best_k)
+
+# 3. Prepare a data frame for plotting: use first two PCs and cluster assignments
+plot_df <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(km_best$cluster)
+)
+
+# 4. Scatter plot the clusters colored by their cluster assignment
+ggplot(plot_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k, ") on First Two PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+------K-means Clustering without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_scaled %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. K-means silhouette analysis for k = 2 to 10
+library(cluster)
+sil_widths_km <- numeric()
+kmeans_results <- list()
+for (k in 2:10) {
+  set.seed(123)  # for reproducibility
+  km <- kmeans(orig_clust_minmax, centers = k)
+  kmeans_results[[k]] <- km
+  sil <- silhouette(km$cluster, dist(orig_clust_minmax))
+  sil_widths_km[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - K-means (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 3. Silhouette summary table for all k
+sil_df_km <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_km[2:10]
+)
+print(sil_df_km)
+
+# 4. Plot average silhouette width vs k
+plot(sil_df_km$k, sil_df_km$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (K-means, Original Features)")
+
+# 5. Select best k (highest silhouette width)
+best_k_km <- sil_df_km$k[which.max(sil_df_km$ASW)]
+cat("Best k by average silhouette width (k-means):", best_k_km, "\n")
+
+# 6. Run final k-means on original data with best k
+set.seed(123)
+km_best <- kmeans(orig_clust_minmax, centers = best_k_km)
+
+# 7. Plot clusters on the first two min-max scaled features (no PCA)
+km_plot_df <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(km_best$cluster)
+)
+
+library(ggplot2)
+ggplot(km_plot_df, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K-means Clustering (k = ", best_k_km, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+TEST CLUSTERING WITHOUT PCA RESULT
+```{r}
+#── 1. Prepare data: drop target/excluded and Min–Max scale ────────────────────
+orig_clust_df <- df_scaled %>%
+  select(- any_of(c(target_variable, exclude_variable)))
+
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+#── 2. Silhouette analysis for k = 2:10 ─────────────────────────────────────────
+sil_widths_km <- numeric(10)
+kmeans_results <- vector("list", 10)
+
+for (k in 2:10) {
+  set.seed(123)  
+  km <- kmeans(orig_clust_minmax, centers = k)
+  kmeans_results[[k]] <- km
+
+  sil <- silhouette(km$cluster, dist(orig_clust_minmax))
+  sil_widths_km[k] <- mean(sil[, "sil_width"])
+  
+  # optional: display each silhouette plot
+  plot(sil,
+       main = paste("Silhouette Plot (k =", k, ")"),
+       border = NA, cex.names = 0.6)
+}
+
+#── 3. Summarize silhouette widths and pick best k ─────────────────────────────
+sil_df_km <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_km[2:10]
+)
+print(sil_df_km)
+
+best_k_km <- sil_df_km$k[which.max(sil_df_km$ASW)]
+cat("Best k by average silhouette width:", best_k_km, "\n")
+
+#── 4. Final k-means with best k ────────────────────────────────────────────────
+set.seed(123)
+km_best <- kmeans(orig_clust_minmax, centers = best_k_km)
+
+#── 5. (Optional) Check cardinality of first two raw features ───────────────────
+cat("Unique values in raw feature 1 & 2:\n")
+print(sapply(orig_clust_df[, 1:2], function(x) length(unique(x))))
+
+#── 6. Plot clustered data on first two features *with jitter* ─────────────────
+km_plot_df <- data.frame(
+  Feature1 = orig_clust_minmax[[1]],
+  Feature2 = orig_clust_minmax[[2]],
+  cluster  = factor(km_best$cluster)
+)
+
+ggplot(km_plot_df, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_jitter(width = 0.01, height = 0.01, alpha = 0.6, size = 1.5) +
+  labs(
+    title = paste0("K‑means Clustering (k=", best_k_km, ") on Features 1 & 2 (jittered)"),
+    x     = "Feature 1 (min–max scaled)",
+    y     = "Feature 2 (min–max scaled)",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+#── 7. (Optional) 2D PCA plot for comparison ────────────────────────────────────
+pca_res <- prcomp(orig_clust_minmax, center = TRUE, scale. = FALSE)
+pca_df <- data.frame(
+  PC1     = pca_res$x[, 1],
+  PC2     = pca_res$x[, 2],
+  cluster = factor(km_best$cluster)
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("K‑means Clustering (k=", best_k_km, ") on PC1 vs PC2"),
+    x     = "PC1",
+    y     = "PC2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+```
+
+----- Clustering Hierarchical
+
+```{r}
+# Hierarchical clustering on the stratified PCA scores
+
+# 1. Compute the Euclidean distance matrix on the PCA scores
+hc_dist_full <- dist(pca_scores_ready, method = "euclidean")
+
+# 2. Perform hierarchical clustering using Ward's method
+hc_ward_full <- hclust(hc_dist_full, method = "ward.D2")
+
+# 3. Plot the dendrogram (labels omitted for clarity)
+plot(
+  as.dendrogram(hc_ward_full),
+  main   = "Hierarchical Clustering Dendrogram (Ward) on Full Sample",
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+
+# 4. Highlight the best_k clusters on the dendrogram
+rect.hclust(hc_ward_full, k = best_k, border = "steelblue")
+
+# 5. Cut the tree into best_k clusters
+hc_clusters_full <- cutree(hc_ward_full, k = best_k)
+
+# 6. Prepare data for scatter plot: first two principal components, colored by cluster
+hc_plot_df_full <- data.frame(
+  PC1     = pca_scores_ready[, 1],
+  PC2     = pca_scores_ready[, 2],
+  cluster = factor(hc_clusters_full)
+)
+
+# 7. Scatter plot of clusters on first two PCs
+ggplot(hc_plot_df_full, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k, ") on Full Stratified PCs"),
+    x     = "Principal Component 1",
+    y     = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+----- Clustering Hierarchical without PCA
+```{r}
+# 1. Prepare data: remove target/excluded columns and apply min-max scaling
+orig_clust_df <- df_scaled %>%
+  dplyr::select(-dplyr::any_of(c(target_variable, exclude_variable)))
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+# 2. Compute distance matrix and hierarchical clustering
+hc_dist_orig <- dist(orig_clust_minmax, method = "euclidean")
+hc_ward_orig <- hclust(hc_dist_orig, method = "ward.D2")
+
+# 3. Silhouette analysis for k = 2 to 10
+library(cluster)
+sil_widths_hc <- numeric()
+for (k in 2:10) {
+  clusters <- cutree(hc_ward_orig, k)
+  sil <- silhouette(clusters, hc_dist_orig)
+  sil_widths_hc[k] <- mean(sil[, "sil_width"])
+  # Plot silhouette for each k
+  plot(
+    sil,
+    main = paste("Silhouette Plot (k =", k, ") - Hierarchical (Original Features)"),
+    border = NA,
+    cex.names = 0.6
+  )
+}
+
+# 4. Plot average silhouette width vs. k
+plot(2:10, sil_widths_hc[2:10], type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (Hierarchical, Original Features)")
+
+# 5. Select best k (highest silhouette width)
+best_k_hc <- which.max(sil_widths_hc)
+cat("Best k by average silhouette width (hierarchical):", best_k_hc, "\n")
+
+# 6. Dendrogram with rectangles for chosen clusters
+plot(
+  as.dendrogram(hc_ward_orig),
+  main   = paste0("Hierarchical Clustering Dendrogram (k = ", best_k_hc, ")"),
+  ylab   = "Height",
+  labels = FALSE,
+  hang   = -1
+)
+rect.hclust(hc_ward_orig, k = best_k_hc, border = "steelblue")
+
+# 7. Assign clusters for the best k
+hc_clusters_orig <- cutree(hc_ward_orig, k = best_k_hc)
+
+# 8. Plot clusters on the first two min-max scaled features (no PCA)
+hc_plot_df_orig <- data.frame(
+  Feature1 = orig_clust_minmax[, 1],
+  Feature2 = orig_clust_minmax[, 2],
+  cluster  = factor(hc_clusters_orig)
+)
+
+library(ggplot2)
+ggplot(hc_plot_df_orig, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k = ", best_k_hc, ") on First Two Features"),
+    x     = "Feature 1",
+    y     = "Feature 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+TEST CLUSTERING WITHOUT PCA RESULT
+```{r}
+#── 1. Prepare data: drop target/excluded and Min–Max scale ────────────────────
+orig_clust_df <- df_scaled %>%
+  select(- any_of(c(target_variable, exclude_variable)))
+
+orig_clust_minmax <- as.data.frame(lapply(orig_clust_df, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  (x - rng[1]) / (rng[2] - rng[1])
+}))
+
+#── 2. Compute distance matrix and hierarchical clustering (Ward’s method) ────
+hc_dist_orig  <- dist(orig_clust_minmax, method = "euclidean")
+hc_ward_orig  <- hclust(hc_dist_orig, method = "ward.D2")
+
+#── 3. Silhouette analysis for k = 2:10 ────────────────────────────────────────
+sil_widths_hc <- numeric(10)
+
+for (k in 2:10) {
+  clusters <- cutree(hc_ward_orig, k)
+  sil      <- silhouette(clusters, hc_dist_orig)
+  sil_widths_hc[k] <- mean(sil[, "sil_width"])
+  
+  # optional: display each silhouette plot
+  plot(sil,
+       main = paste("Silhouette Plot (k =", k, ") - Hierarchical"),
+       border = NA, cex.names = 0.6)
+}
+
+#── 4. Summarize silhouette widths and pick best k ─────────────────────────────
+sil_df_hc <- data.frame(
+  k   = 2:10,
+  ASW = sil_widths_hc[2:10]
+)
+print(sil_df_hc)
+
+best_k_hc <- sil_df_hc$k[which.max(sil_df_hc$ASW)]
+cat("Best k by average silhouette width (hierarchical):", best_k_hc, "\n")
+
+#── 5. Plot Avg. Silhouette Width vs k ────────────────────────────────────────
+plot(sil_df_hc$k, sil_df_hc$ASW, type = "b", pch = 19,
+     xlab = "Number of clusters (k)",
+     ylab = "Average silhouette width",
+     main = "Silhouette Width vs. k (Hierarchical)")
+
+#── 6. Dendrogram with rectangles for chosen clusters ─────────────────────────
+plot(as.dendrogram(hc_ward_orig),
+     main   = paste0("Hierarchical Clustering Dendrogram (k = ", best_k_hc, ")"),
+     ylab   = "Height",
+     labels = FALSE,
+     hang   = -1)
+rect.hclust(hc_ward_orig, k = best_k_hc, border = "steelblue")
+
+#── 7. Assign clusters for the best k ─────────────────────────────────────────
+hc_clusters_orig <- cutree(hc_ward_orig, k = best_k_hc)
+
+#── 8. (Optional) Check cardinality of first two raw features ──────────────────
+cat("Unique values in raw feature 1 & 2:\n")
+print(sapply(orig_clust_df[, 1:2], function(x) length(unique(x))))
+
+#── 9. Plot clustered data on first two features *with jitter* ────────────────
+hc_plot_df_orig <- data.frame(
+  Feature1 = orig_clust_minmax[[1]],
+  Feature2 = orig_clust_minmax[[2]],
+  cluster  = factor(hc_clusters_orig)
+)
+
+ggplot(hc_plot_df_orig, aes(x = Feature1, y = Feature2, color = cluster)) +
+  geom_jitter(width = 0.01, height = 0.01, alpha = 0.6, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k=", best_k_hc, 
+                   ") on Features 1 & 2 (jittered)"),
+    x     = "Feature 1 (min–max scaled)",
+    y     = "Feature 2 (min–max scaled)",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+#── 10. (Optional) 2D PCA plot for comparison ─────────────────────────────────
+pca_res <- prcomp(orig_clust_minmax, center = TRUE, scale. = FALSE)
+pca_df  <- data.frame(
+  PC1     = pca_res$x[, 1],
+  PC2     = pca_res$x[, 2],
+  cluster = factor(hc_clusters_orig)
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  labs(
+    title = paste0("Hierarchical Clustering (k=", best_k_hc, 
+                   ") on PC1 vs PC2"),
+    x     = "PC1",
+    y     = "PC2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+# Packages (install if needed)
+# install.packages(c("caret","randomForest","pROC"))
+library(caret)
+library(randomForest)
+library(pROC)
+library(dplyr)
+
+set.seed(123)
+
+# 0) Copy & make a clean binary target called 'Alz' with levels No/Yes
+df_rf <- df_scaled
+
+# robust target -> Alz mapping (handles 0/1 or Yes/No)
+tcol <- target_variable
+if (is.numeric(df_rf[[tcol]])) {
+  df_rf$Alz <- factor(ifelse(df_rf[[tcol]] == 1, "Yes", "No"),
+                      levels = c("No","Yes"))
+} else {
+  v <- as.character(df_rf[[tcol]])
+  yes_vals <- c("1","yes","Yes","Y","Positive","AD","Alzheimer")
+  df_rf$Alz <- factor(ifelse(v %in% yes_vals, "Yes", "No"),
+                      levels = c("No","Yes"))
+}
+
+# 1) Drop the original target column from predictors
+df_rf <- df_rf %>% select(-all_of(tcol))
+
+# 2) Remove near-zero-variance predictors (important after encoding)
+nzv <- nearZeroVar(df_rf)
+if (length(nzv) > 0) df_rf <- df_rf[, -nzv]
+
+# 3) Train/test split stratified on Alz
+set.seed(123)
+idx <- createDataPartition(df_rf$Alz, p = 0.7, list = FALSE)
+train_pp <- df_rf[idx, ]
+test_pp  <- df_rf[-idx, ]
+
+# 4) TrainControl for ROC
+ctrl <- trainControl(
+  method          = "repeatedcv",
+  number          = 5,
+  repeats         = 2,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# 5) Random Forest (single mtry like your example). Adjust mtry if needed.
+p <- ncol(train_pp) - 1  # predictors count
+rf_mod <- train(
+  Alz ~ .,
+  data      = train_pp,
+  method    = "rf",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneGrid  = data.frame(mtry = floor(sqrt(p))),  # or set a specific value, e.g. 5
+  ntree     = 500
+)
+
+print(rf_mod)
+
+# 6) Evaluate on hold-out
+rf_probs <- predict(rf_mod, test_pp, type = "prob")[, "Yes"]
+rf_preds <- ifelse(rf_probs > 0.5, "Yes", "No")
+
+rf_cm <- confusionMatrix(
+  factor(rf_preds, levels = c("No","Yes")),
+  test_pp$Alz,
+  positive = "Yes"
+)
+print(rf_cm)
+
+# Accuracy
+rf_acc <- rf_cm$overall["Accuracy"]
+cat("RF Accuracy:", round(rf_acc, 4), "\n")
+
+# AUC
+rf_roc <- roc(
+  response  = test_pp$Alz,
+  predictor = rf_probs,
+  levels    = c("No","Yes"),
+  direction = "<"
+)
+cat("RF AUC:", round(auc(rf_roc), 4), "\n")
+plot(rf_roc, main = "ROC Curve — Random Forest")
+
+# 7) (Optional) Variable importance
+vip <- varImp(rf_mod, scale = TRUE)
+print(vip)
+plot(vip, top = 20, main = "Top 20 Important Predictors (RF)")
+
+```
+
+```{r}
+# install.packages(c("caret","xgboost","pROC")) # if needed
+library(caret)
+library(pROC)
+library(dplyr)
+
+set.seed(123)
+
+# 0) Prepare data and Alz target (No/Yes)
+df_xgb <- df_scaled
+tcol <- target_variable
+if (is.numeric(df_xgb[[tcol]])) {
+  df_xgb$Alz <- factor(ifelse(df_xgb[[tcol]] == 1, "Yes", "No"),
+                       levels = c("No","Yes"))
+} else {
+  v <- as.character(df_xgb[[tcol]])
+  yes_vals <- c("1","yes","Yes","Y","Positive","AD","Alzheimer")
+  df_xgb$Alz <- factor(ifelse(v %in% yes_vals, "Yes", "No"),
+                       levels = c("No","Yes"))
+}
+df_xgb <- df_xgb %>% select(-all_of(tcol))  # drop original target
+
+# 1) (Optional) remove near-zero-variance predictors to speed up
+nzv <- nearZeroVar(df_xgb)
+if (length(nzv) > 0) df_xgb <- df_xgb[, -nzv]
+
+# 2) Train/test split
+set.seed(123)
+idx <- createDataPartition(df_xgb$Alz, p = 0.7, list = FALSE)
+train_pp <- df_xgb[idx, ]
+test_pp  <- df_xgb[-idx, ]
+
+# 3) Lightweight trainControl (3-fold CV, ROC metric)
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 3,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  verboseIter     = FALSE
+)
+
+# --- XGBoost (single grid row, fast) ---
+xgb_mod <- train(
+  Alz ~ .,
+  data      = train_pp,
+  method    = "xgbTree",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneGrid  = data.frame(
+    nrounds          = 100,
+    max_depth        = 6,
+    eta              = 0.3,
+    gamma            = 0,
+    colsample_bytree = 0.8,
+    min_child_weight = 1,
+    subsample        = 0.8
+  )
+)
+
+print(xgb_mod)
+
+# 4) Evaluate on the hold-out
+xgb_probs <- predict(xgb_mod, test_pp, type = "prob")[, "Yes"]
+xgb_preds <- ifelse(xgb_probs > 0.5, "Yes", "No")
+
+xgb_cm  <- confusionMatrix(
+  factor(xgb_preds, levels = c("No","Yes")),
+  test_pp$Alz,
+  positive = "Yes"
+)
+print(xgb_cm)
+
+# Accuracy
+xgb_acc <- xgb_cm$overall["Accuracy"]
+cat("XGB Accuracy:", round(xgb_acc, 4), "\n")
+
+# AUC + ROC
+xgb_roc <- roc(
+  response  = test_pp$Alz,
+  predictor = xgb_probs,
+  levels    = c("No","Yes")
+)
+cat("XGB AUC:", round(auc(xgb_roc), 4), "\n")
+plot(xgb_roc, main = "ROC Curve for XGBoost (single-grid)")
+
+```
+
+```{r}
+# install.packages(c("caret","gbm","pROC")) # if needed
+library(caret)
+library(gbm)
+library(pROC)
+
+# --- GBM with caret's default tuning ---
+gbm_mod <- train(
+  Alz ~ .,                      # or: Alz ~ . - Alzheimer.s.Diagnosis
+  data      = train_pp,
+  method    = "gbm",
+  metric    = "ROC",
+  trControl = ctrl,              # e.g., 3-fold CV with classProbs + twoClassSummary
+  verbose   = FALSE              # suppress gbm training output
+  # no tuneGrid → caret explores its default grid
+)
+
+print(gbm_mod)
+
+# --- Evaluate on hold-out ---
+gbm_probs <- predict(gbm_mod, test_pp, type = "prob")[, "Yes"]
+gbm_preds <- ifelse(gbm_probs > 0.5, "Yes", "No")
+
+gbm_cm <- confusionMatrix(
+  factor(gbm_preds, levels = c("No","Yes")),
+  test_pp$Alz,
+  positive = "Yes"
+)
+print(gbm_cm)
+cat("GBM Accuracy:", round(gbm_cm$overall["Accuracy"], 4), "\n")
+
+# AUC & ROC
+gbm_roc <- roc(
+  response  = test_pp$Alz,
+  predictor = gbm_probs,
+  levels    = c("No","Yes"),
+  direction = "<"
+)
+cat("GBM AUC:", round(auc(gbm_roc), 4), "\n")
+plot(gbm_roc, main = "ROC Curve for GBM")
+
+```
+
+```{r}
+# install.packages(c("caret","C50","pROC")) # if needed
+library(caret)
+library(C50)
+library(pROC)
+
+# --- C5.0 with caret's default tuning ---
+c50_mod <- train(
+  Alz ~ .,                      # or: Alz ~ . - Alzheimer.s.Diagnosis
+  data      = train_pp,
+  method    = "C5.0",
+  metric    = "ROC",
+  trControl = ctrl               # e.g., 3-fold CV with classProbs + twoClassSummary
+  # no tuneGrid here → caret will explore the default grid of trials/model/winnow
+)
+
+print(c50_mod)
+
+# --- Evaluate on hold-out ---
+c50_probs <- predict(c50_mod, test_pp, type = "prob")[, "Yes"]
+c50_preds <- ifelse(c50_probs > 0.5, "Yes", "No")
+
+c50_cm <- confusionMatrix(
+  factor(c50_preds, levels = c("No","Yes")),
+  test_pp$Alz,
+  positive = "Yes"
+)
+print(c50_cm)
+cat("C5.0 Accuracy:", round(c50_cm$overall["Accuracy"], 4), "\n")
+
+# AUC & ROC
+c50_roc <- roc(
+  response  = test_pp$Alz,
+  predictor = c50_probs,
+  levels    = c("No","Yes"),
+  direction = "<"
+)
+cat("C5.0 AUC:", round(auc(c50_roc), 4), "\n")
+plot(c50_roc, main = "ROC Curve for C5.0")
+
+```
