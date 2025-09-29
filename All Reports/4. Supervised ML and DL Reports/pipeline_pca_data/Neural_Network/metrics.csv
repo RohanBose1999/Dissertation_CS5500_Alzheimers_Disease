@@ -1,0 +1,21 @@
+metric,value
+Accuracy,0.7415644171779141
+Cohen's Kappa,0.4831288343558282
+True Positive (TP) - class 0,465.0
+True Negative (TN) - class 0,502.0
+False Positive (FP) - class 0,150.0
+False Negative (FN) - class 0,187.0
+True Positive Rate (TPR) / Sensitivity - class 0,0.7131901840490797
+True Negative Rate (TNR) / Specificity - class 0,0.7699386503067485
+Precision - class 0,0.7560975609756098
+F1 Score - class 0,0.734017363851618
+True Positive (TP) - class 1,502.0
+True Negative (TN) - class 1,465.0
+False Positive (FP) - class 1,187.0
+False Negative (FN) - class 1,150.0
+True Positive Rate (TPR) / Sensitivity - class 1,0.7699386503067485
+True Negative Rate (TNR) / Specificity - class 1,0.7131901840490797
+Precision - class 1,0.7285921625544267
+F1 Score - class 1,0.7486950037285608
+AUC - class 0,0.8207756219654484
+AUC - class 1,0.8207756219654485
