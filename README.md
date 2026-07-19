@@ -4,7 +4,7 @@
 
 <br>
 
-<h2>The problem I set out to solve</h2>
+<h2>The Problem I Set Out To Solve</h2>
 
 <p>Alzheimer's disease is the most common cause of dementia, and it is difficult to detect early. Progression is slow, and the tests that confirm it, such as neuroimaging and cerebrospinal fluid biomarkers, are costly and often invasive. With an ageing population, there is a real need for tools that are affordable, accessible, and can flag risk early using data that clinicians already have.</p>
 <p>My project explores a practical alternative. Rather than working with scans, I used structured tabular data covering demographics, lifestyle factors, cognitive test scores, biomarkers, and symptom indicators. The aim was to test whether disciplined data curation and honest evaluation could produce reliable predictions from this kind of everyday data.</p>
@@ -81,7 +81,7 @@ Every model was trained on the same stratified 80/20 split, with fixed random se
 <p>It also makes a practical point: well-curated tabular data, the kind that is cheap to collect, can support meaningful Alzheimer's screening without imaging. That matters for accessibility and cost in real healthcare settings.</p>
 <br>
 
-<h2>Tools and skills this demonstrates</h2>
+<h2>Tools and Skills This Demonstrates</h2>
 <p><b>Languages and libraries:</b> R (tidyverse, mice, dlookr, ggplot2) for data engineering and EDA; Python (scikit-learn, XGBoost, LightGBM, CatBoost, TensorFlow, pandas, matplotlib) for modelling and evaluation.</p>
 <p><b>Techniques:</b> data integration, principled missing-data imputation, feature engineering and selection, dimensionality reduction, clustering, supervised classification, cross-validation, and a full evaluation framework using accuracy, AUC, precision, recall, specificity, F1, and Cohen's kappa.</p>
 <p><b>Practices:</b> reproducible, modular software design, version control on GitHub, leakage prevention, and clear documentation from raw data to final result.</p>
