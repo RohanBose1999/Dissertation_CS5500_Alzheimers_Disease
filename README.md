@@ -15,6 +15,7 @@
 <p>The question guiding the whole project was: <b><i>How can Machine Learning and Deep Learning techniques be applied within R and Python-based software to accurately and efficiently predict Alzheimer's disease?</i></b></p>
 
 <p>To answer it, I set myself six goals: review recent work in the field, find and combine suitable datasets, clean and explore the data, look for hidden structure using unsupervised methods, build a range of predictive models, and compare them fairly using a consistent set of metrics.</p>
+![This is the entire pipeline](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/0747ee8cd6dfc6ec9591a1ac3fc9564dd87a8942/ReadMeImages/Pipeline.png)
 <br>
 
 <h2>The Data I Used</h2>
