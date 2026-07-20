@@ -34,20 +34,22 @@ The final merged dataset held <b>7,149 patient records across 47 variables</b>. 
 ### Merging and handling missing data
 <p>Combining two datasets always leaves gaps. I filled missing values using MICE (Multiple Imputation by Chained Equations), a principled method that estimates each missing value from the other variables rather than just dropping rows or guessing an average. Numeric gaps were filled using a random forest approach and categorical gaps using logistic regression. Crucially, I kept the diagnosis label out of this process so the model could never accidentally learn the answer from the imputation, a common and subtle source of cheating known as data leakage.</p>
 
-![]()
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/6318b57fdbb339e8e41df7765365f9d7babf566d/ReadMeImages/mergeDatasets.jpg)
 
 ### Cleaning and exploring
 <p>After merging, I screened for outliers, re-imputed where needed, and ran exploratory data analysis to understand the shape of the data: distributions, relationships between variables, and any warning signs before modelling. Every diagnostic was saved as a report so the reasoning is transparent.</p>
 
-![]()
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/6318b57fdbb339e8e41df7765365f9d7babf566d/ReadMeImages/dataCleaning.jpg)
 
 ### Finding structure in the data
 <p>Before predicting anything, I looked at the data with unsupervised methods. Principal Component Analysis compressed the many variables into a smaller set of directions that capture most of the variation, and K-means and hierarchical clustering checked whether patients naturally fall into groups that line up with the diagnosis. This step builds intuition and helps with feature selection.</p>
 
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/6318b57fdbb339e8e41df7765365f9d7babf566d/ReadMeImages/unsupervisedMlStructure.jpg)
+
 ### Building and comparing models
 <p>I then trained the predictive models three separate times, on three different views of the data: the full original feature set, the compressed PCA version, and a compact set of the 19 most important features ranked by a random forest. Comparing the same models across these three views shows whether more data or smarter feature selection actually helps.</p>
 
-![]()
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/6318b57fdbb339e8e41df7765365f9d7babf566d/ReadMeImages/accuracy_comparison.jpeg)
 
 <br>
 
@@ -83,7 +85,7 @@ Every model was trained on the same stratified 80/20 split, with fixed random se
 
 <p>To make sure this was not a lucky split, I ran 10-fold cross-validation on the winning CatBoost model. It held up well, averaging 82.8% accuracy and an AUC of 0.906 with low variation across folds. That consistency is what tells me the model generalises rather than memorising.</p>
 
-![]()
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/6318b57fdbb339e8e41df7765365f9d7babf566d/ReadMeImages/top5_roc.jpeg)
 
 <p>One useful finding was that the compressed PCA view lost several points of accuracy, which means the full feature detail genuinely carried signal. The compact 19-feature set, by contrast, nearly matched the full set, showing that a small, well-chosen group of variables can do most of the work.
 </p>
