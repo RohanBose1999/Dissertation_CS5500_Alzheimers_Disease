@@ -25,6 +25,15 @@
 
 <p>No single public dataset had everything I needed, so I combined two from Kaggle. The first was an Alzheimer's Disease dataset with detailed clinical and cognitive variables. The second was a larger global Alzheimer's prediction dataset rich in lifestyle and demographic features. I balanced the second dataset so both classes were equally represented, harmonised the labels, removed identifiers and duplicates, and merged the two into a single analysis-ready table.
 The final merged dataset held <b>7,149 patient records across 47 variables</b>. This gave me a broad picture of each individual, from blood pressure and cholesterol to memory complaints, family history, and cognitive test scores.</p>
+
+<p>Link to the two datasets I used from Kaggle
+<br>
+  
++ <b>Dataset 1:</b> https://www.kaggle.com/datasets/rabieelkharoua/alzheimers-disease-dataset
+  
++ <b>Dataset 2:</b> https://www.kaggle.com/datasets/ankushpanday1/alzheimers-prediction-dataset-global
+</p>
+
 <br>
 
 <h2>How I Built The Workflow</h2>
