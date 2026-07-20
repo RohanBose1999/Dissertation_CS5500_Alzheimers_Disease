@@ -114,6 +114,7 @@ Every model was trained on the same stratified 80/20 split, with fixed random se
 <h2>Dissertation</h2>
 <p>The full dissertation report is included in the main branch of this repository as a PDF. It documents the complete methodology, literature review, results, and analysis behind this project, including every figure, metric table, and the reasoning at each stage of the pipeline.</p>
 
-### Read the full dissertation (PDF) in the Github Main Repository
+### Read the full dissertation (PDF) in the Github Main Repository **[HERE](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/main/2412933_CS5500.pdf)**
 
 <p>Alzheimer's Disease Prediction with R and Python-Based Software Using Machine Learning and Deep Learning. MSc Data Science and Analytics, Brunel University London (2024-2025).</p>
+
