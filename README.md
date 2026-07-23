@@ -98,6 +98,9 @@ Every model was trained on the same stratified 80/20 split, with fixed random se
 
 <p>One useful finding was that the compressed PCA view lost several points of accuracy, which means the full feature detail genuinely carried signal. The compact 19-feature set, by contrast, nearly matched the full set, showing that a small, well-chosen group of variables can do most of the work.
 </p>
+
+![](https://github.com/RohanBose1999/Dissertation_CS5500_Alzheimers_Disease/blob/9df4d68646c5a65835ca4285d91c960e9bd154b3/ReadMeImages/Top19FeaturesRandomForest.jpg)
+
 <br>
 
 <h2>Why The Approach Matters</h2>
